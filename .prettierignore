@@ -1,0 +1,7 @@
+pnpm-lock.yaml
+packages/*/CHANGELOG.md
+dist
+coverage
+LICENSE
+COPYRIGHT
+*.tsbuildinfo
