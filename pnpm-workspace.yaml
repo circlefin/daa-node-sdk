@@ -1,0 +1,17 @@
+packages:
+  - 'packages/*'
+
+# Every entry resolves from the public npm registry. This repo deliberately has
+# no `@circlefin/*` preset dependency and no `.npmrc`: the packages here are
+# installed by distributors, so a fresh clone, an external CI runner, or a
+# contributor without special registry credentials must still be able to build and
+# test.
+catalog:
+  '@types/node': '22.19.7'
+  '@vitest/coverage-v8': '4.1.11'
+  'eslint': '^9.39.1'
+  'eslint-config-prettier': '^10.1.8'
+  'prettier': '^3.6.2'
+  'typescript': '5.9.3'
+  'typescript-eslint': '^8.46.0'
+  'vitest': '4.1.11'
