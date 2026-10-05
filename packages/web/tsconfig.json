@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The only package in this workspace that needs the DOM: everything it
+    // does is reached through browser APIs.
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["src/**/*", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}
