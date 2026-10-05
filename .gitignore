@@ -1,0 +1,8 @@
+node_modules
+dist
+coverage
+*.tsbuildinfo
+eslint_report.json
+.turbo
+.DS_Store
+*.tgz
