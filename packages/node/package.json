@@ -1,0 +1,48 @@
+{
+  "name": "@circle-fin/daa-node-sdk",
+  "version": "0.2.0",
+  "type": "module",
+  "//private": "Stays true in the repo. The release workflows flip it to false in the manifest they pack, so nothing can be published by accident from a checkout or a stray `pnpm publish`.",
+  "private": true,
+  "description": "Server-side SDK for Digital Asset Accounts — the API-key authenticated endpoints",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "!src/__tests__",
+    "!src/**/*.test.ts"
+  ],
+  "sideEffects": false,
+  "//engines": "node >=22 matches the two current published @circle-fin wallets SDKs, which both declare it. Deliberately not >=18, even though the only hard requirement in the code is the global fetch that landed in Node 18 (see the guard in src/transport.ts): 18 is the floor below which this cannot work, not the floor Circle supports. The root manifest pins >=22.22.0 to mirror .nvmrc — that is a contributor pin, and consumers are deliberately held to the looser range. Treat a change to this range as a support-policy change, not a note: it is enforceable. Measured against npm 11.16.0 — a consumer with engine-strict=true has the install refused outright (EBADENGINE, exit 1), not warned. Without that setting npm warns and installs, and pnpm 10.34.5 says nothing at all.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "pnpm clean && tsc --project tsconfig.build.json",
+    "prepack": "pnpm build",
+    "check:type": "tsc --project tsconfig.json --pretty --noEmit",
+    "check:pack": "node scripts/check-pack.mjs",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "eslint": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
