@@ -1,0 +1,55 @@
+{
+  "name": "@circle-fin/daa-web-sdk",
+  "version": "0.1.1",
+  "type": "module",
+  "//private": "Stays true in the repo. The release workflows flip it to false in the manifest they pack, so nothing can be published by accident from a checkout or a stray `pnpm publish`.",
+  "private": true,
+  "description": "Browser SDK for Digital Asset Accounts — Strong Customer Authentication passkey ceremonies",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "default": "./dist/protocol.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "!src/__tests__",
+    "!src/**/*.test.ts"
+  ],
+  "sideEffects": false,
+  "//engines": "An install- and integration-time claim, not a runtime one: this package runs in a browser and has no Node runtime requirement of its own. It says Circle supports installing and bundling this with a Node 22+ toolchain — and that is enforceable rather than advisory, so a consumer running engine-strict=true on an older toolchain has the install refused (measured on npm 11.16.0: EBADENGINE, exit 1). Declared anyway, with that cost understood: one floor across both halves of the same SDK is clearer to an integrator than one half declaring nothing. Kept identical to packages/node; if the two ever need to differ, that is worth a sentence here rather than a silent drift.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "pnpm clean && tsc --project tsconfig.build.json",
+    "prepack": "pnpm build",
+    "check:type": "tsc --project tsconfig.json --pretty --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "check:pack": "node scripts/check-pack.mjs"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "catalog:",
+    "eslint": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
