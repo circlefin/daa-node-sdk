@@ -1,3 +1,21 @@
+/**
+ * Copyright (c) 2026, Circle Internet Group, Inc. All rights reserved.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 import { resolveBaseUrl, resolveTimeoutMs } from './config.js'
 import type { DaaSdkConfig } from './config.js'
 import { DaaApiError, isDaaApiError } from './errors.js'
@@ -8,6 +26,7 @@ import type {
   ListPasskeysQuery,
   OpenChallengeRequest,
   PasskeyCreated,
+  PasskeyStatus,
   PasskeyView,
   RegistrationCreated,
   RevokePasskeyQuery,
@@ -22,6 +41,11 @@ export interface PasskeysApi {
   complete(request: CompleteRegistrationRequest): Promise<PasskeyCreated>
   /** Lists an end user's credentials, revoked ones included with `revokedDate` set. */
   list(query: ListPasskeysQuery): Promise<readonly PasskeyView[]>
+  /**
+   * The same request as {@link list}, also returning whether Circle requires SCA
+   * for the end user. `sca` is `null` when that is unknown.
+   */
+  status(query: ListPasskeysQuery): Promise<PasskeyStatus>
   /** Revokes a credential. Soft — nothing is deleted. */
   revoke(passkeyId: string, query: RevokePasskeyQuery): Promise<void>
   /** Opens an intent-bound step-up ceremony. Hand only `frameToken` to the browser. */
@@ -194,6 +218,41 @@ export const createDaaClient = (config: DaaSdkConfig): DaaClient => {
   const query = (params: Readonly<Record<string, string>>): string =>
     `?${new URLSearchParams(params).toString()}`
 
+  // One GET serves both list() and status(): the response carries both.
+  const readPasskeys = async (q: ListPasskeysQuery): Promise<PasskeyStatus> => {
+    const url = `${baseUrl}${PASSKEYS}${query({ clientEntityId: q.clientEntityId })}`
+    const {
+      status,
+      rawBody,
+      value: body,
+    } = await requireBody<{
+      readonly passkeys?: unknown
+      readonly sca?: unknown
+    }>({ method: 'GET', url })
+    // Checked rather than trusted. list() promises an array, and
+    // the version that returned `body.passkeys` unchecked handed callers
+    // `undefined` from it — a `TypeError` at their call site, nowhere near
+    // the response that caused it.
+    //
+    // `passkeys` is typed `unknown` above so the check is the only way to
+    // get past it; declaring it as the array type and then testing it
+    // would be asserting what is being verified. The cast afterwards is
+    // where this package stops validating: that it *is* an array is
+    // checked, what the elements look like is DAA's contract — the same
+    // line `code` and `operation` draw.
+    if (!Array.isArray(body.passkeys)) {
+      // The status and body it actually arrived with. Reconstructing
+      // either would point a reader at something the server never sent —
+      // the same mistake a hardcoded `200` made two commits ago.
+      throw new DaaApiError({
+        status,
+        rawBody,
+        message: `GET ${url} succeeded without a "passkeys" array`,
+      })
+    }
+    return { sca: scaRequirement(body.sca), passkeys: body.passkeys as readonly PasskeyView[] }
+  }
+
   return {
     passkeys: {
       createRegistration: (request) =>
@@ -212,38 +271,9 @@ export const createDaaClient = (config: DaaSdkConfig): DaaClient => {
           body: JSON.stringify(request),
         }),
 
-      list: async (q) => {
-        const url = `${baseUrl}${PASSKEYS}${query({ clientEntityId: q.clientEntityId })}`
-        const {
-          status,
-          rawBody,
-          value: body,
-        } = await requireBody<{
-          readonly passkeys?: unknown
-        }>({ method: 'GET', url })
-        // Checked rather than trusted. This signature promises an array, and
-        // the version that returned `body.passkeys` unchecked handed callers
-        // `undefined` from it — a `TypeError` at their call site, nowhere near
-        // the response that caused it.
-        //
-        // `passkeys` is typed `unknown` above so the check is the only way to
-        // get past it; declaring it as the array type and then testing it
-        // would be asserting what is being verified. The cast afterwards is
-        // where this package stops validating: that it *is* an array is
-        // checked, what the elements look like is DAA's contract — the same
-        // line `code` and `operation` draw.
-        if (!Array.isArray(body.passkeys)) {
-          // The status and body it actually arrived with. Reconstructing
-          // either would point a reader at something the server never sent —
-          // the same mistake a hardcoded `200` made two commits ago.
-          throw new DaaApiError({
-            status,
-            rawBody,
-            message: `GET ${url} succeeded without a "passkeys" array`,
-          })
-        }
-        return body.passkeys as readonly PasskeyView[]
-      },
+      list: async (q) => (await readPasskeys(q)).passkeys,
+
+      status: readPasskeys,
 
       revoke: async (passkeyId, q) => {
         await send<never>({
@@ -263,3 +293,17 @@ export const createDaaClient = (config: DaaSdkConfig): DaaClient => {
     },
   }
 }
+
+/**
+ * The response's `sca` member as a {@link PasskeyStatus} `sca`. Anything that is
+ * not `{ required: boolean }` — absent, `null`, or malformed — reads as unknown
+ * (`null`) rather than failing the call: the requirement is a hint, the
+ * protected endpoint's 428 is the enforcement, and an older response that never
+ * sent `sca` still lists passkeys.
+ */
+const scaRequirement = (sca: unknown): PasskeyStatus['sca'] =>
+  typeof sca === 'object' &&
+  sca !== null &&
+  typeof (sca as { required?: unknown }).required === 'boolean'
+    ? { required: (sca as { required: boolean }).required }
+    : null

@@ -1,4 +1,22 @@
 /**
+ * Copyright (c) 2026, Circle Internet Group, Inc. All rights reserved.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
  * The passkey surface of the DAA public API.
  *
  * Five routes, and exactly the five the API gateway exposes under
@@ -166,6 +184,32 @@ export interface PasskeyView {
   readonly revokedDate?: string
 }
 
+/**
+ * Whether Circle requires Strong Customer Authentication (SCA) for an end user.
+ * A hint for deciding whether to prompt passkey enrollment or open a challenge
+ * first. The protected endpoint is still the enforcement point: it answers HTTP
+ * 428 whenever SCA is required and no SCA headers were sent.
+ */
+export interface ScaRequirement {
+  /**
+   * `true` when protected operations for this end user require SCA. `false`
+   * means Circle does not require it, not that it is disallowed.
+   */
+  readonly required: boolean
+}
+
+/** An end user's SCA requirement together with their passkeys. */
+export interface PasskeyStatus {
+  /**
+   * `null` when the requirement is unknown: Circle could not determine it right
+   * now, or the response did not carry it. Treat it as unknown, never as "not
+   * required", and still handle a 428 from a protected call.
+   */
+  readonly sca: ScaRequirement | null
+  /** The same array {@link PasskeysApi.list} returns, revoked passkeys included. */
+  readonly passkeys: readonly PasskeyView[]
+}
+
 export interface RevokePasskeyQuery {
   /**
    * End user whose passkey is revoked. The API verifies that this ID belongs
@@ -306,6 +350,8 @@ export interface OpenChallengeRequest {
    * The round trip, which this SDK does not perform for you:
    *
    * ```ts
+   * import { SCA_HEADERS } from '@circle-fin/daa-node-sdk'
+   *
    * const { challengeId, frameToken } = await daa.passkeys.openChallenge({
    *   clientEntityId, operation: 'TRANSFER', intent: body,
    * })
@@ -366,6 +412,8 @@ export interface OpenChallengeRequest {
    * the same string in both places:
    *
    * ```ts
+   * import { SCA_HEADERS } from '@circle-fin/daa-node-sdk'
+   *
    * const { challengeId, frameToken } = await daa.passkeys.openChallenge({
    *   clientEntityId,
    *   operation: 'ADDRESS_BOOK_DELETE',

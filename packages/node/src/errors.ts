@@ -1,4 +1,22 @@
 /**
+ * Copyright (c) 2026, Circle Internet Group, Inc. All rights reserved.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
  * Every Circle error code the SCA surface can return.
  *
  * The name-to-number pairing comes from DAA's own error-code definitions,
@@ -6,7 +24,7 @@
  *
  * Whether a number reaches you unchanged is a second question, and the answer
  * is the API gateway: **every route this package calls is proxied through it**,
- * including the ones whose codes fall outside the `420046`–`420063` SCA block.
+ * including the ones whose codes fall outside the `420046`–`420067` SCA block.
  * It maps a downstream code to a public one from an allow-list, and a code
  * missing from that list does not arrive as itself — it arrives as `-1` with
  * a generic message. So a code named here is one Circle intends you to branch
@@ -29,8 +47,7 @@ export const DAA_ERROR_CODES = {
   // with a different `spcCapable`, or with a different `clientEntityId` the
   // caller also owns — ownership is verified before the idempotency lookup,
   // so one it does not own returns `CLIENT_ENTITY_NOT_OWNED` instead. A
-  // different `embedOrigin` is the same 409 (not yet observed: DAA returns it
-  // once a server-side change deploys).
+  // different `embedOrigin` is the same 409.
   //
   // Listed because a caller hits them before they hit anything in the SCA
   // block — the first is what an unmapped end user returns, which is the
@@ -59,6 +76,17 @@ export const DAA_ERROR_CODES = {
   // that matches none of your approved origins is `API_PARAMETER_INVALID`
   // (`code: 2`) instead, because that one is the request's to fix.
   SCA_ORIGIN_NOT_CONFIGURED: 420064, // createRegistration(), openChallenge()
+  // `complete()` with a `registrationId` that does not exist, or that belongs
+  // to another entity — deliberately indistinguishable. Answered with `404`.
+  PASSKEY_REGISTRATION_NOT_FOUND: 420065, // complete()
+  // An `intent` whose source or destination names a location type (a fiat
+  // rail, say) that SCA does not accept. Distinct from `API_PARAMETER_INVALID`
+  // so an unsupported rail is not mistaken for a malformed body.
+  SCA_INTENT_LOCATION_TYPE_UNSUPPORTED: 420066, // openChallenge(), and the gated route below
+  // `createRegistration()`, `complete()` and `openChallenge()`, and the gated
+  // route below: a request body over the size limit (128 KiB on the passkey
+  // routes) is refused with `413` before it is read.
+  REQUEST_BODY_TOO_LARGE: 420067,
 
   // Raised by the *gated* route you call after the ceremony — one of the five
   // listed on `OpenChallengeRequest.operation` — not by anything in this

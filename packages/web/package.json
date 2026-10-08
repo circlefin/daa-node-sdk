@@ -1,6 +1,6 @@
 {
   "name": "@circle-fin/daa-web-sdk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "//private": "Stays true in the repo. The release workflows flip it to false in the manifest they pack, so nothing can be published by accident from a checkout or a stray `pnpm publish`.",
   "private": true,

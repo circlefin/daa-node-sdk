@@ -1,22 +1,54 @@
 # `@circle-fin/daa-node-sdk`
 
-Server-side SDK for Digital Asset Accounts — the API-key authenticated
-endpoints.
+Server-side SDK for Circle Digital Asset Accounts. It wraps the passkey
+endpoints under `/v1/accounts/passkeys`, which you call with your Circle API
+key, so that your end users can register passkeys and approve sensitive
+operations with them (Strong Customer Authentication, or SCA).
 
-**This package holds your Circle API key. Nothing here belongs in front-end
-code.** The browser half is [`@circle-fin/daa-web-sdk`](../web), which never
-holds a credential. They are the two ends of one flow:
+**This package holds your Circle API key. Use it only on your backend, never in
+browser code.** The browser half of the flow is
+[`@circle-fin/daa-web-sdk`](https://github.com/circlefin/daa-node-sdk/blob/master/packages/web/README.md), which never holds a credential.
+
+For the end-to-end integration flow, see
+[How-to: Implement Strong Customer Authentication](https://developers.circle.com/digital-asset-accounts/howtos/strong-customer-authentication)
+in Circle's developer documentation. This README is the reference for the
+package itself.
+
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [API reference](#api-reference)
+- [Approving an operation (step-up)](#approving-an-operation-step-up)
+- [Error handling](#error-handling)
+- [Security checklist](#security-checklist)
+- [Support and security reporting](#support-and-security-reporting)
+
+## Install
+
+```bash
+npm install @circle-fin/daa-node-sdk
+```
+
+Requires Node.js 22 or later. The package is ESM-only.
+
+## Quick start
+
+Registering a passkey takes three steps. Steps 1 and 3 run in this package on
+your backend. Step 2 runs in the browser with
+[`@circle-fin/daa-web-sdk`](https://github.com/circlefin/daa-node-sdk/blob/master/packages/web/README.md).
 
 ```
-① daa.passkeys.createRegistration(…)   ← this package   (holds the API key)
-② hand `frameToken` to the page        ← the only thing that crosses
-◆ sca.enroll(frameToken, presentation) ← @circle-fin/daa-web-sdk (holds nothing)
-③ daa.passkeys.complete(…)             ← this package   (holds the API key)
+1. daa.passkeys.createRegistration(...)   your backend   (holds the API key)
+   -> send frameToken to your page         the only value that crosses
+2. sca.enroll(frameToken, ...)            your web app   (holds no credentials)
+   -> send the result to your backend
+3. daa.passkeys.complete(...)             your backend   (holds the API key)
 ```
 
-## Usage
+Backend:
 
 ```ts
+import { randomUUID } from 'node:crypto'
 import { createDaaClient } from '@circle-fin/daa-node-sdk'
 
 const daa = createDaaClient({
@@ -24,276 +56,330 @@ const daa = createDaaClient({
   apiKey: process.env.CIRCLE_API_KEY!,
 })
 
-// ① Open an enrollment ceremony.
+// Step 1. Open a registration for one of your end users.
 const { registrationId, frameToken } = await daa.passkeys.createRegistration({
-  clientEntityId,
-  idempotencyKey: crypto.randomUUID(),
+  clientEntityId, // the end user's client entity ID
+  idempotencyKey: randomUUID(),
+  embedOrigin: 'https://app.example.com', // the page that will show the ceremony
 })
 
-// ② Hand ONLY frameToken to the page. Not registrationId, not the rest.
-//    The ceremony's summary is fetched by the Circle frame from Circle, which
-//    is what keeps it out of your code.
+// Send ONLY frameToken to the page. Keep registrationId on your side, for
+// example in the user's session, so you can pair it with the result in step 3.
 
-// ③ Submit what the browser produced, relayed verbatim.
-const { passkeyId } = await daa.passkeys.complete({ registrationId, attestationResponse })
+// Step 3. After the page sends back the result of sca.enroll(), submit it
+// exactly as received.
+const { passkeyId, credentialId } = await daa.passkeys.complete({
+  registrationId,
+  attestationResponse, // the unmodified object from the browser
+})
 ```
 
-`environment` is `sandbox` or `production` — the same list and the same field
-name as the web SDK's `ScaSdkConfig`. It selects the API origin:
+Browser (step 2), using the web SDK:
 
-| `environment` | API origin                       | ceremony origin the web SDK pairs with it |
-| ------------- | -------------------------------- | ----------------------------------------- |
-| `sandbox`     | `https://api-sandbox.circle.com` | `https://daa-sca-sandbox.circle.com`      |
-| `production`  | `https://api.circle.com`         | `https://daa-sca.circle.com`              |
+```ts
+import { createScaClient } from '@circle-fin/daa-web-sdk'
 
-Both SDKs deriving their hosts from one `environment` is what stops a pair of
-hand-written hostnames from ending up on two different deployments.
+const sca = createScaClient({ environment: 'sandbox' })
+const attestationResponse = await sca.enroll(frameToken, {
+  mode: 'modal',
+})
+// Send attestationResponse to your backend unchanged.
+```
 
-To target another Circle host that Circle has given you, set `environment` to
-`sandbox` and `baseUrl` to that host's origin (see `baseUrl` below).
+A registration is open for ten minutes. If it expires before you call
+`complete`, open a new one.
 
-### If Circle told you your API keys are EU-restricted
+## Configuration
 
-Set `euRestricted: true`. It selects the EU-residency endpoint for your
+`createDaaClient(config)` accepts the following fields.
+
+| Field                   | Required | Default | Description                                                                                                      |
+| ----------------------- | -------- | ------- | ---------------------------------------------------------------------------------------------------------------- |
+| `environment`           | Yes      |         | `'sandbox'` or `'production'`. Selects the API host.                                                             |
+| `apiKey`                | Yes      |         | Your Circle API key. Must not be empty.                                                                          |
+| `euRestricted`          | No       | `false` | Set to `true` if Circle told you your API keys are EU-restricted. See [EU-restricted keys](#eu-restricted-keys). |
+| `timeoutMs`             | No       | `30000` | Per-request timeout for the default transport, an integer from 1 to 2147483647.                                  |
+| `transport`             | No       | `fetch` | Your own HTTP function. Needed for [mTLS](#mtls), custom retry or tracing. It must enforce its own timeout.      |
+| `baseUrl`               | No       |         | Overrides the API origin. Use only a value Circle gave you. See below.                                           |
+| `allowNonCircleBaseUrl` | No       |         | Set to `true` to allow a `baseUrl` that is not on `circle.com`, or `http://localhost` for local development.     |
+
+The client throws a `TypeError` at construction for an invalid `environment`,
+`apiKey`, `timeoutMs` or `baseUrl`, so configuration mistakes surface at
+startup rather than on the first request. `timeoutMs` is checked only when you
+use the default transport. With your own `transport` it is ignored.
+
+### Environments
+
+`environment` selects the API host. Use the same value in the web SDK so that
+both halves target the same Circle environment.
+
+| `environment` | API origin                       | Ceremony origin used by the web SDK  |
+| ------------- | -------------------------------- | ------------------------------------ |
+| `sandbox`     | `https://api-sandbox.circle.com` | `https://daa-sca-sandbox.circle.com` |
+| `production`  | `https://api.circle.com`         | `https://daa-sca.circle.com`         |
+
+Use a sandbox API key with `sandbox` and a production API key with
+`production`.
+
+`baseUrl` replaces the API origin outright. Prefer `environment` and
+`euRestricted` over typing a host yourself. `baseUrl` must be a bare origin
+(no path, query, fragment or credentials) on `circle.com` or a subdomain. For
+another HTTPS origin that Circle gave you, also set
+`allowNonCircleBaseUrl: true`. The client sends your API key to the configured
+host, so never point it at an origin you do not trust.
+
+### EU-restricted keys
+
+If Circle told you that your API keys are EU-restricted, set
+`euRestricted: true`. It selects the EU-residency endpoint for your
 environment:
 
-| `environment` | with `euRestricted: true`           |
+| `environment` | Host with `euRestricted: true`      |
 | ------------- | ----------------------------------- |
 | `sandbox`     | `https://api-sandbox-eu.circle.com` |
 | `production`  | `https://api-eu.circle.com`         |
 
-**This matters more than it looks.** The API gateway rejects an EU-restricted
-key arriving on any host outside its EU allowlist **fail-closed, with `403`, on
-every authenticated request** — before any route in this SDK is reached. So the
-wrong host does not surface as a passkey error; it surfaces as everything being
-forbidden. EU residency and SCA eligibility are separate decisions.
+The SDK cannot tell whether your key is EU-restricted. If you are not sure, ask
+Circle. A key without EU restrictions works on either host, so setting the flag
+unnecessarily is harmless. Leaving it unset for an EU-restricted key makes
+every authenticated request fail with `403` and the message
+`This account must use the EU API endpoint.` That failure does not look like a
+passkey error, so check this setting first if everything is forbidden.
 
-The SDK cannot infer whether your key is EU-restricted. If Circle tells you
-that it is, set `euRestricted: true`; otherwise leave it unset. A key without
-EU restrictions works on either host, so enabling the option unnecessarily is
-harmless. Leaving it unset for an EU-restricted key causes the blanket `403`.
+An EU-restricted key also requires a client certificate (mTLS). See
+[mTLS](#mtls). You need both settings. Residency is checked first, so the
+residency message does not confirm that your certificate is set up correctly.
+Fix the host, then test again.
 
-**If you set it, you also need a client certificate.** An EU-restricted key
-also requires mTLS, and the default `fetch` transport cannot present a
-certificate. See [mTLS](#mtls) below; you need both pieces or neither works.
+| Your key       | Host   | Certificate | Result                                             |
+| -------------- | ------ | ----------- | -------------------------------------------------- |
+| EU-restricted  | EU     | Yes         | `200`                                              |
+| EU-restricted  | EU     | No          | `403 "Valid mTLS client certificate required."`    |
+| EU-restricted  | non-EU | Either      | `403 "This account must use the EU API endpoint."` |
+| Not restricted | Either | Either      | `200`                                              |
 
-The two checks are independent and evaluated **residency first**:
+### mTLS
 
-| Your key      | Host   | Certificate | Result                                             |
-| ------------- | ------ | ----------- | -------------------------------------------------- |
-| EU-restricted | EU     | yes         | `200`                                              |
-| EU-restricted | EU     | no          | `403 "Valid mTLS client certificate required."`    |
-| EU-restricted | non-EU | yes         | `403 "This account must use the EU API endpoint."` |
-| EU-restricted | non-EU | no          | `403 "This account must use the EU API endpoint."` |
-| neither       | either | either      | `200`                                              |
-
-Note the last EU-restricted row: on the wrong host you get the **residency**
-message even when you have no certificate at all, because residency is checked
-first. So that message does not tell you your certificate setup is correct —
-fix the host, then retest.
-
-`baseUrl` overrides the origin outright. Prefer `euRestricted` over hand-typing
-an EU host — a hostname you type is a hostname you can typo, and this one fails
-as a blanket `403`. By default, `baseUrl` must use `circle.com` or a subdomain.
-For a non-Circle HTTPS origin explicitly provided by Circle, set
-`allowNonCircleBaseUrl: true`. That same opt-in is required for
-`http://localhost` during local development. The client sends the entity API
-key to the configured host, so do not use an origin you do not trust.
-
-The default fetch transport aborts a request after 30 seconds. Set `timeoutMs`
-to change that deadline. If you inject a custom `transport`, it must enforce
-its own timeout.
-
-## Surface
-
-Five routes, and exactly the five the API gateway exposes under
-`/v1/accounts/passkeys`.
-
-| Method                        | Route                                      |
-| ----------------------------- | ------------------------------------------ |
-| `passkeys.createRegistration` | `POST /v1/accounts/passkeys/registrations` |
-| `passkeys.complete`           | `POST /v1/accounts/passkeys`               |
-| `passkeys.list`               | `GET /v1/accounts/passkeys`                |
-| `passkeys.revoke`             | `DELETE /v1/accounts/passkeys/{passkeyId}` |
-| `passkeys.openChallenge`      | `POST /v1/accounts/passkeys/challenges`    |
-
-**Use the public path shown above.** Adding a `/daa` segment produces a 404.
-
-### Two routes are deliberately absent
-
-- **`POST …/challenges/{id}/validate`** is not part of the public API. The API
-  validates challenges as part of gated money-movement requests.
-- **`GET /v1/daa/frame/ceremony`** is called by the Circle ceremony frame with
-  a capability token, not an API key.
-
-## Step-up
-
-`passkeys.openChallenge` opens an intent-bound challenge; the browser runs the
-ceremony with the `frameToken`; then **you resend the gated request yourself**,
-with two headers:
-
-| Header                    | Value                                                 |
-| ------------------------- | ----------------------------------------------------- |
-| `SCA_HEADERS.challengeId` | `challengeId` from `openChallenge`                    |
-| `SCA_HEADERS.assertion`   | what `@circle-fin/daa-web-sdk`'s `approve()` returned |
-
-`SCA_HEADERS` is exported so these are not names you type. **None of them are
-sent by this SDK** — the gated request is yours, on your own route, with your
-own client.
-
-The assertion is **raw JSON text**, not base64url of it. DAA feeds the string
-straight to its JSON reader and base64url-decodes only the fields inside
-(`rawId`, `response.clientDataJSON`, `response.authenticatorData`,
-`response.signature`); a base64url-encoded envelope fails with `"assertion is
-not valid strict JSON"`. The web SDK's `approve()` returns the header value
-already serialized, for exactly this reason.
-
-### Name the page that hosts the ceremony
-
-`createRegistration` and `openChallenge` both take an optional `embedOrigin`:
-the origin of your page that embeds the ceremony, for example
-`https://app.example.com`. It must exactly match one of the origins Circle has
-approved for you, and the ceremony is bound to it. If that origin is removed
-from your approved origins before the ceremony completes, the ceremony fails.
-
-**Send it on every call.** Once you have more than one approved origin (two
-web apps, say), a call without it fails with
-`API_PARAMETER_INVALID` (`code: 2`), because nothing else says which page the
-ceremony runs from. With one approved origin, omitting it uses that one, but
-the integration then breaks the day a second origin is approved. A blank value,
-or one that matches none of your approved origins, is the same
-`API_PARAMETER_INVALID`: the request is wrong, not your onboarding.
-`SCA_ORIGIN_NOT_CONFIGURED` (`420064`) means you have no approved origin at
-all.
-
-### Replaying an idempotency key rotates the frameToken
-
-`createRegistration` with a key you have used before returns the **same
-ceremony** — same `registrationId`, same `expiresAt` — and a **new
-`frameToken`** every time.
-
-**The previous token is invalidated.** A replay creates a fresh token because
-the previous bearer value cannot be returned. Only the newest token works.
-
-That makes the replay narrower than the word "idempotent" suggests, and in
-one direction it is actively unsafe:
-
-> **Once you have handed the token to the page, do not retry this call under
-> the same key.** The retry returns `200` with the same `registrationId` and
-> reads as a clean replay, while the ceremony your user is part-way through
-> stops working. Nothing in the response reports it.
-
-Retrying a call whose response you never received — the case an idempotency
-key exists for — is safe. Retrying one whose token you already delivered is
-not.
-
-Reusing the key with a different `spcCapable` is `IDEMPOTENCY_KEY_REUSED`
-(409) rather than a replay, and omitting that field is the same request as
-sending `false` — the service treats an omitted value as `false` before it
-looks up the key, so only a true/false disagreement conflicts. A different
-`embedOrigin` is the same 409, but omitting it on the replay is not a
-conflict: the original ceremony comes back, still bound to the origin it was
-opened for. A different `clientEntityId` is the same conflict in principle,
-but ownership is verified before the idempotency lookup: one you do not own
-returns `CLIENT_ENTITY_NOT_OWNED` (420001) first, and the conflict surfaces
-only for an end user you do own.
-
-### There is no "SCA applied" header, and you do not need one
-
-Whether SCA applies to an end user is Circle's determination — it follows the
-entity's legal entity, and Circle is the regulated party that has to get it
-right. A request Circle did not gate simply succeeds.
-
-This is worth a section only because `X-Sca-Authorization-Id` exists and is
-easy to mistake for a confirmation signal. It is not one: Circle stamps it on
-the request it proxies _inward_, so the service executing the movement can
-record which authorization permitted it, and a copy sent by a caller is
-stripped at ingress. It never travels back out, which is why `SCA_HEADERS`
-does not name it.
-
-If you believe an entity should be in scope and its transfers are going
-through without a ceremony, raise it with Circle.
-
-Five routes have SCA intents — `POST /v1/accounts/transfers`,
-`POST /v1/accounts/withdrawals`, `POST /v1/banks/wires`,
-`POST /v1/addresses/recipient` and `DELETE /v1/addresses/recipient/{id}` —
-The routes that require SCA are determined by Circle. The SDK does not expose
-or document rollout state. `intent` on `openChallenge` is the gated route's own
-request body, verbatim — `idempotencyKey` included, because it is inside the
-signed canonical intent. That key binds the approved intent; it is not a
-request-level idempotency key for `openChallenge`. A retry under a new
-idempotency key is a different intent and needs a new challenge, so one
-approval cannot be replayed across two submissions.
-
-There is no `approve()`-style helper here on purpose: the gated request is
-yours, on your own route, with your own client. This SDK does not proxy it.
-
-## Rate limits
-
-The `/v1/accounts/passkeys` group is rate-limited at the gateway, so `429` is a
-reachable `DaaApiError`. The response carries Circle's envelope and no
-`Retry-After`, which means back-off is your policy to set — one more thing the
-injected transport is for.
-
-## mTLS
-
-`/v1/accounts/passkeys` requires a client certificate only when your API key is
-configured to require mTLS. Until then a bearer API key over HTTPS is enough
-and the default transport works.
-
-Once your key is flagged, a certificate is required. Cloudflare runs _optional_
-mTLS by design — it asks for a certificate, accepts either answer, and forwards
-whatever it gets — so the edge is not what rejects you. The API gateway is the
-sole enforcement point, after key exchange, which is why the failure is a `403`
-from the API rather than a TLS handshake error.
-
-Node's global `fetch` cannot be given a certificate, so rather than take a
-dependency for a case most callers do not have, supply a transport:
+If your API key requires mTLS, every request must present a client certificate.
+Node's global `fetch` cannot do that, so supply a `transport`. This example
+uses [`undici`](https://www.npmjs.com/package/undici):
 
 ```ts
-import { Agent } from 'undici'
+import { Agent, fetch } from 'undici'
+import { createDaaClient, DaaTransportError } from '@circle-fin/daa-node-sdk'
 
-const agent = new Agent({ connect: { cert, key } })
+const agent = new Agent({ connect: { cert, key } }) // your PEM certificate and key
 
 const daa = createDaaClient({
-  environment,
-  apiKey,
+  environment: 'production',
+  euRestricted: true,
+  apiKey: process.env.CIRCLE_API_KEY!,
   transport: async ({ method, url, headers, body }) => {
-    const res = await fetch(url, { method, headers, body, dispatcher: agent })
-    return { status: res.status, body: await res.text() }
+    try {
+      const res = await fetch(url, { method, headers, body, dispatcher: agent })
+      return { status: res.status, body: await res.text() }
+    } catch (cause) {
+      // Report network and TLS failures as DaaTransportError, like the default transport.
+      throw new DaaTransportError(`Request to ${url} failed`, { cause })
+    }
   },
 })
 ```
 
-The same seam makes every test in this package run without a network. A custom
-transport keeps the caller's timeout and observability policy; the default
-fetch transport uses `timeoutMs` (30 seconds by default). Retry behavior is
-route-specific, and this SDK does not retry requests automatically.
-The custom transport receives the entity API key in `headers.authorization`;
-do not log request headers or include them in transport errors.
+A custom transport owns timeouts, retries and tracing. The SDK does not retry
+requests on its own, and it passes errors thrown by your transport through
+unchanged. Throw `DaaTransportError` for network and TLS failures, as above, so
+that they are not mistaken for the `TypeError` the SDK uses for invalid input. The transport receives your API key in
+`headers.authorization`, so do not log request headers or include them in
+errors you throw from the transport.
 
-## Responses are wrapped
+### Rate limits
 
-Every successful Circle response carries its payload under `data`:
+The passkey endpoints are rate-limited, so a `429` response can reach you as a
+`DaaApiError`. The response has no `Retry-After` header, so choose your own
+back-off.
 
-```json
-{ "data": { "registrationId": "…", "expiresAt": "…", "frameToken": "…" } }
+## API reference
+
+All methods are on `daa.passkeys`, return promises, and unwrap Circle's
+`{ "data": ... }` response envelope for you.
+
+| Method                                              | HTTP request                               | Returns                                                        |
+| --------------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------- |
+| `createRegistration(request)`                       | `POST /v1/accounts/passkeys/registrations` | `{ registrationId, expiresAt, frameToken }`                    |
+| `complete({ registrationId, attestationResponse })` | `POST /v1/accounts/passkeys`               | `{ passkeyId, credentialId }`                                  |
+| `list({ clientEntityId })`                          | `GET /v1/accounts/passkeys`                | Array of passkeys, including revoked ones (`revokedDate` set)  |
+| `status({ clientEntityId })`                        | `GET /v1/accounts/passkeys`                | `{ sca, passkeys }`: whether SCA is required, and the passkeys |
+| `revoke(passkeyId, { clientEntityId })`             | `DELETE /v1/accounts/passkeys/{passkeyId}` | Nothing. Revoking marks the passkey revoked.                   |
+| `openChallenge(request)`                            | `POST /v1/accounts/passkeys/challenges`    | `{ challengeId, expiresAt, summary, frameToken }`              |
+
+### `createRegistration`
+
+| Field            | Required | Description                                                                             |
+| ---------------- | -------- | --------------------------------------------------------------------------------------- |
+| `clientEntityId` | Yes      | The end user. It must belong to your entity.                                            |
+| `idempotencyKey` | Yes      | A unique value per registration attempt, such as a UUID.                                |
+| `embedOrigin`    | No       | The origin of your page that shows the ceremony, for example `https://app.example.com`. |
+| `spcCapable`     | No       | Leave unset unless Circle tells you otherwise.                                          |
+
+**Always send `embedOrigin`.** It must exactly match one of the web app origins
+Circle has registered for you (scheme, host and port, with no trailing slash
+or path, at most 512 characters). The ceremony is bound to that origin. With a
+single registered origin, omitting it works, but the call starts failing with
+`API_PARAMETER_INVALID` (`code: 2`) as soon as you register a second origin. A
+blank value, or a value that matches none of your registered origins, returns
+the same error. If you have no registered origin at all, you get
+`SCA_ORIGIN_NOT_CONFIGURED` (`420064`).
+
+The same `embedOrigin` rules apply to `openChallenge`.
+
+#### Retrying and idempotency
+
+Calling `createRegistration` again with the same `idempotencyKey` returns the
+same registration (same `registrationId` and `expiresAt`) with a **new
+`frameToken`**, and the previous token stops working.
+
+- Retrying after a network failure where you never received a response is
+  safe.
+- **Do not retry with the same key after you have given the token to the
+  page.** The retry succeeds and looks like a clean replay, but the ceremony
+  your user is in the middle of stops working, and nothing in the response
+  says so. If you need to restart, use a new `idempotencyKey`.
+
+Reusing a key with a different `spcCapable` or `embedOrigin` value returns
+`IDEMPOTENCY_KEY_REUSED` (HTTP `409`).
+
+- An omitted `spcCapable` counts as `false`.
+- Omitting `embedOrigin` on a retry is not a conflict. The original ceremony
+  comes back, still bound to the origin it was opened for.
+
+### `complete`
+
+Pass `attestationResponse` exactly as the web SDK's `enroll()` returned it.
+Re-serializing or modifying it invalidates the signature.
+
+A `registrationId` that does not exist, or that belongs to another entity,
+returns `404` with `PASSKEY_REGISTRATION_NOT_FOUND` (`420065`).
+
+### `list`, `status` and `revoke`
+
+All three take the `clientEntityId` of the end user who owns the passkey.
+`status` makes the same request as `list` and also returns `sca`:
+`{ required: true }` when Circle requires SCA for that end user,
+`{ required: false }` when it does not, and `null` when that is unknown. Treat
+`null` as unknown, not as "not required": a protected call still answers `428`
+whenever SCA is required. A
+`passkeyId` must be 1 to 128 letters, digits, underscores or hyphens; anything
+else throws a `TypeError` before a request is sent.
+
+## Approving an operation (step-up)
+
+After a user has registered a passkey, you can require them to approve an
+operation with it. The sequence has four steps and the final request is yours:
+
+1. **Your backend** calls `daa.passkeys.openChallenge(...)` with the exact
+   request you intend to send, and sends only the `frameToken` to the page.
+2. **Your web app** calls `sca.approve(frameToken, ...)` from
+   `@circle-fin/daa-web-sdk`. It returns the assertion as a string.
+3. The page sends that string to your backend over your own authenticated
+   channel.
+4. **Your backend** sends the original request to Circle with two extra
+   headers.
+
+```ts
+import { SCA_HEADERS } from '@circle-fin/daa-node-sdk'
+
+// Step 1. `transferBody` is the request body you will send to the gated route.
+const { challengeId, frameToken } = await daa.passkeys.openChallenge({
+  clientEntityId,
+  operation: 'TRANSFER',
+  intent: transferBody,
+  embedOrigin: 'https://app.example.com',
+})
+// Send frameToken to the page. Keep challengeId on your side.
+
+// Step 4. `assertion` is the string the page returned from sca.approve().
+await fetch('https://api-sandbox.circle.com/v1/accounts/transfers', {
+  method: 'POST',
+  headers: {
+    authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+    'content-type': 'application/json',
+    [SCA_HEADERS.challengeId]: challengeId, // X-Sca-Challenge-Id
+    [SCA_HEADERS.assertion]: assertion, // X-Sca-Assertion
+  },
+  body: JSON.stringify(transferBody), // the same body, not a rebuilt one
+})
 ```
 
-This SDK unwraps it, so the methods return the payload. **Errors are not
-wrapped** — they are flat `{"code": N, "message": "…"}` — which is why
-`DaaApiError` reads the body directly. A successful response without `data` is
-rejected.
+This SDK never sends the gated request. You send it with your own HTTP client,
+so use the API origin for your environment (see [Environments](#environments)).
 
-## Errors
+### `openChallenge` fields
 
-|                     | Meaning                                                                                                                                                                                                                               |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DaaApiError`       | A non-2xx response. Carries `status`, `rawBody`, and `code`/`message` when the body parsed as Circle's error envelope.                                                                                                                |
-| `DaaTransportError` | DNS, TLS, timeout, or reset. The request may or may not have been applied; check that method's retry contract before retrying. Only `createRegistration` has a request-level idempotency lookup, and replay rotates its `frameToken`. |
+| Field            | Required | Description                                                                                                                        |
+| ---------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `clientEntityId` | Yes      | The end user approving the operation.                                                                                              |
+| `operation`      | Yes      | The operation, as an uppercase name: `TRANSFER`, `WITHDRAWAL`, `WIRE_ACCOUNT_CREATE`, `ADDRESS_BOOK_ADD` or `ADDRESS_BOOK_DELETE`. |
+| `intent`         | Yes      | The gated route's own request body, verbatim. Use `{}` for `ADDRESS_BOOK_DELETE`, which has no body.                               |
+| `pathParameters` | No       | Path parameters for an operation whose subject is in the URL. Used by `ADDRESS_BOOK_DELETE`.                                       |
+| `embedOrigin`    | No       | Same rules as for `createRegistration`. Always send it.                                                                            |
 
-`code` is Circle's **numeric** public error code, not a symbolic status name.
-`DAA_ERROR_CODES` gives you named constants for commonly handled codes:
+The operations correspond to these routes:
+
+| `operation`           | Gated request                         |
+| --------------------- | ------------------------------------- |
+| `TRANSFER`            | `POST /v1/accounts/transfers`         |
+| `WITHDRAWAL`          | `POST /v1/accounts/withdrawals`       |
+| `WIRE_ACCOUNT_CREATE` | `POST /v1/banks/wires`                |
+| `ADDRESS_BOOK_ADD`    | `POST /v1/addresses/recipient`        |
+| `ADDRESS_BOOK_DELETE` | `DELETE /v1/addresses/recipient/{id}` |
+
+Any other operation name returns `SCA_OPERATION_NOT_IMPLEMENTED` (`420062`).
+
+Rules that matter:
+
+- **Send the identical body.** The challenge is bound to the intent you passed,
+  including its `idempotencyKey`. If you send a different body, or the same
+  body under a new `idempotencyKey`, it is a different intent and needs a new
+  challenge. One approval cannot be reused for two submissions.
+- **For `ADDRESS_BOOK_DELETE`, name the recipient in `pathParameters`.** Pass
+  `intent: {}` and `pathParameters: { id: recipientId }`. The key must be
+  exactly `id`. Any other key makes `openChallenge` fail with
+  `API_PARAMETER_INVALID` (`code: 2`). Use the same string that you put in the
+  `DELETE` URL, written as a canonical UUID. Circle rejects other spellings
+  instead of normalizing them. The SDK does not check these rules. Circle does.
+- **Check field names against the gated route's own documentation.** Circle
+  does not reject an unrecognized field in a body-carrying intent. A
+  misspelled field is dropped from the summary your user approves, but it is
+  still covered by what they sign.
+- **Pass the assertion through as text.** The value from `sca.approve()` is raw
+  JSON text. Do not base64url-encode it, or the request fails with
+  `assertion is not valid strict JSON`.
+- **Do not render `summary` yourself.** The response includes a `summary` for
+  your records. The ceremony shows the user a summary that Circle fetches
+  independently. Do not build your own confirmation screen from `summary`.
+- A challenge is valid for five minutes.
+
+Whether Circle requires SCA for a particular request is Circle's
+determination for the end user's entity. A request that does not require SCA
+succeeds without the headers. If you believe a request should have required
+SCA and did not, contact Circle.
+
+## Error handling
+
+The SDK throws three kinds of error.
+
+| Error               | When                                                                                                                                                |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DaaApiError`       | Circle answered with a non-2xx status, or a 2xx response without a `data` payload. Has `status`, `code`, `message` and `rawBody`.                   |
+| `DaaTransportError` | The request failed before a usable response: DNS, TLS, timeout or connection reset. The request may or may not have been applied.                   |
+| `TypeError`         | Invalid input, such as a bad `environment`, `baseUrl` or `apiKey`, or an empty `passkeyId`. No request was sent. This is a bug in the calling code. |
+
+Check them with `isDaaApiError(error)` and `isDaaTransportError(error)`.
+
+`DaaApiError.code` is Circle's numeric public error code. It is a plain
+`number | undefined`, not a closed union, because Circle can add codes at any
+time. `DAA_ERROR_CODES` provides named constants:
 
 ```ts
 import { DAA_ERROR_CODES, isDaaApiError } from '@circle-fin/daa-node-sdk'
@@ -302,55 +388,77 @@ try {
   await daa.passkeys.complete({ registrationId, attestationResponse })
 } catch (error) {
   if (isDaaApiError(error) && error.code === DAA_ERROR_CODES.PASSKEY_REGISTRATION_EXPIRED) {
-    // Ten minutes elapsed. Open a new ceremony; nothing was registered.
+    // The registration expired. Start again with a new createRegistration call.
+  } else {
+    throw error
   }
 }
 ```
 
-It is **not narrowed to a union**: Circle can add a code without this SDK being
-republished, and a caller matching on an unknown number is better than one that
-cannot see it at all.
+Codes you are most likely to branch on:
 
-`message` alongside it is caller-actionable — "The passkey registration has
-expired", not a stack trace. That does not make the complete error safe to log:
-`DaaApiError.rawBody` preserves the upstream response verbatim. Apply your
-service's normal redaction and retention rules before logging errors.
+| Constant                                | Code     | Raised by                              | What to do                                                                                                            |
+| --------------------------------------- | -------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `CLIENT_ENTITY_NOT_OWNED`               | `420001` | Any call that takes a `clientEntityId` | The ID is not an end user of your entity. It is also what you get if the end user has not completed account creation. |
+| `IDEMPOTENCY_KEY_REUSED`                | `420034` | `createRegistration`                   | The key was used with different parameters. Use a new key.                                                            |
+| `PASSKEY_REGISTRATION_NOT_FOUND`        | `420065` | `complete`                             | The `registrationId` does not exist or belongs to another entity.                                                     |
+| `PASSKEY_REGISTRATION_EXPIRED`          | `420051` | `complete`                             | The registration is older than ten minutes. Nothing was registered. Open a new one.                                   |
+| `PASSKEY_REGISTRATION_CONSUMED`         | `420052` | `complete`                             | The registration was already completed.                                                                               |
+| `PASSKEY_CREDENTIAL_ALREADY_REGISTERED` | `420053` | `complete`                             | This authenticator credential is already registered. Route the user to step-up instead of enrollment.                 |
+| `SCA_ASSERTION_INVALID`                 | `420046` | `complete`, and the gated request      | The submitted ceremony result did not verify. Open a new ceremony.                                                    |
+| `SCA_OPERATION_NOT_IMPLEMENTED`         | `420062` | `openChallenge`                        | The `operation` is not one of the supported names above.                                                              |
+| `SCA_ORIGIN_NOT_CONFIGURED`             | `420064` | `createRegistration`, `openChallenge`  | No web app origin is registered for you. Contact Circle.                                                              |
 
-An auth failure carries the HTTP status as its `code` — `401`, not a
-`4200xx` — so do not assume `code` is always in DAA's range.
+`DAA_ERROR_CODES` also contains codes for the gated request, such as
+`SCA_ASSERTION_REQUIRED` (`420058`), `SCA_INTENT_MISMATCH` (`420047`),
+`SCA_CHALLENGE_EXPIRED` (`420054`) and `SCA_CHALLENGE_CONSUMED` (`420055`).
+Treat each as "this challenge cannot be used; open a new one."
 
-Two codes outside the SCA block come up before any inside it, and both are in
-`DAA_ERROR_CODES`:
+Other values of `code` to handle:
 
-| code     | name                      | when                                                                                                                                                                                                                                                                                                                                                                          |
-| -------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `420001` | `CLIENT_ENTITY_NOT_OWNED` | the `clientEntityId` is not an end user of your entity. Every route that takes one, which is every route but `complete()` — that one takes a `registrationId` and answers a plain `404` when the registration belongs to another entity. This is what a `clientEntityId` that has not been through account creation returns, so it is the first error a new integration sees. |
-| `420034` | `IDEMPOTENCY_KEY_REUSED`  | `createRegistration` with a key already used for a different `spcCapable` or `embedOrigin`, or for a different `clientEntityId` you also own — one you do not own returns `420001` first, because ownership is verified before the idempotency lookup.                                                                                                                        |
+- `2` is `API_PARAMETER_INVALID`: a request field is wrong. The `message` says
+  which.
+- An authentication failure carries the HTTP status as its `code` (`401`), not
+  a `4200xx` value.
+- `-1` means the gateway did not recognize the upstream response. The
+  `message` contains an `errId`. Give that identifier to Circle support.
+- `undefined` means the body had no numeric `code`. An HTML error page from a
+  proxy does this. So does `revoke` for a passkey that does not exist, which
+  returns a plain `404`. Inspect `status` and `rawBody`.
 
-Two values are worth handling explicitly. `-1` means the API gateway did not
-recognize what the upstream service returned, and the `message` then carries an
-`errId` — that identifier is what Circle support needs. `undefined` means the
-body carried no numeric `code` at all, which is what a 502 HTML page from an
-edge proxy looks like.
+The `message` text is written for callers and is safe to act on. Your API key
+never appears in an error message. `rawBody` holds the upstream response
+verbatim, so apply your normal redaction rules before you log it.
 
-`rawBody` is always present for that reason: a body that did not parse is
-exactly when you need to see what arrived.
+## Security checklist
 
-Those two types describe what happened to a request. A **`TypeError`** means no
-request was built at all — an invalid `environment` or `baseUrl`, an empty
-`apiKey`, an empty `passkeyId`. Those are programming errors, and they are
-raised where the mistake is rather than classified alongside a response.
+- **Keep the API key on your server.** Load it from your secret manager or an
+  environment variable. Never put it in a browser bundle, a mobile app or a
+  repository.
+- **Send the browser only the `frameToken`.** Do not send `registrationId`,
+  `challengeId`, `summary` or anything else from these responses to the page.
+- **Treat `frameToken` as a secret.** It lets its holder read one pending
+  ceremony. Do not log it or put it in a URL. Deliver it to the page over your
+  own authenticated channel.
+- **Do not log API responses or `rawBody` unredacted.**
+- **Relay browser results unchanged.** Do not parse, re-serialize or re-encode
+  the `attestationResponse` or the assertion.
+- **Authenticate the browser-to-backend hop yourself.** Your endpoints that
+  receive the ceremony result must check that the request comes from the
+  signed-in user the registration or challenge was opened for.
+- **Only point `baseUrl` at hosts you trust.** The client sends your API key to
+  it.
 
-The API key never appears in an error message. There is a test asserting it.
+## Support and security reporting
 
-## Do not log the responses
+- Integration guide: [How-to: Implement Strong Customer Authentication](https://developers.circle.com/digital-asset-accounts/howtos/strong-customer-authentication)
+- API reference: [Digital Asset Accounts](https://developers.circle.com/api-reference/digital-asset-accounts)
+- Integration questions: contact your Circle representative.
+- Bugs in this SDK: open a GitHub issue.
+- Security vulnerabilities: do not file a public issue. Report them privately
+  through Circle's [Vulnerability Disclosure Program](https://hackerone.com/circle-bbp).
+  See [SECURITY.md](https://github.com/circlefin/daa-node-sdk/blob/master/SECURITY.md).
 
-`frameToken` is a capability: holding it grants a read of one pending ceremony.
-DAA only persists its SHA-256 for that reason. These are plain objects, so
-nothing here can redact them for you — keep them out of logs, and hand the
-token to the page over your own authenticated channel.
+## License
 
-## Publishing
-
-Publishing to npm under `@circle-fin` is handled by the release workflow;
-`private: true` is flipped only in the manifest it packs.
+[Apache License 2.0](https://github.com/circlefin/daa-node-sdk/blob/master/LICENSE)
