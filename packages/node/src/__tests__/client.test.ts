@@ -1,3 +1,21 @@
+/**
+ * Copyright (c) 2026, Circle Internet Group, Inc. All rights reserved.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createDaaClient } from '../client.js'
@@ -249,7 +267,8 @@ describe('errors', () => {
     // Both observed against a Circle test environment. `CLIENT_ENTITY_NOT_OWNED` is what
     // an end user with no parent-entity mapping returns — from the four routes that
     // verify ownership, which is every one except `complete()`; that one
-    // filters on the parent entity and answers a bare 404 with no DAA code.
+    // filters on the parent entity and answers 404 with
+    // `PASSKEY_REGISTRATION_NOT_FOUND` (420065).
     // It is still the first thing a new integration gets wrong.
     //
     // `IDEMPOTENCY_KEY_REUSED` comes back from createRegistration when a key
@@ -263,6 +282,9 @@ describe('errors', () => {
     expect(DAA_ERROR_CODES.CLIENT_ENTITY_NOT_OWNED).toBe(420001)
     expect(DAA_ERROR_CODES.IDEMPOTENCY_KEY_REUSED).toBe(420034)
     expect(DAA_ERROR_CODES.SCA_ORIGIN_NOT_CONFIGURED).toBe(420064)
+    expect(DAA_ERROR_CODES.PASSKEY_REGISTRATION_NOT_FOUND).toBe(420065)
+    expect(DAA_ERROR_CODES.SCA_INTENT_LOCATION_TYPE_UNSUPPORTED).toBe(420066)
+    expect(DAA_ERROR_CODES.REQUEST_BODY_TOO_LARGE).toBe(420067)
 
     rec.reply({
       status: 400,
@@ -395,6 +417,47 @@ describe('the data envelope', () => {
     // Byte-for-byte what a Circle test environment returned.
     rec.reply({ rawBody: '{"data":{"passkeys":[]}}' })
     await expect(daa.passkeys.list({ clientEntityId: 'c' })).resolves.toEqual([])
+  })
+
+  it('returns the SCA requirement with the passkeys from status()', async () => {
+    rec.reply({ rawBody: '{"data":{"sca":{"required":true},"passkeys":[{"passkeyId":"p-1"}]}}' })
+    await expect(daa.passkeys.status({ clientEntityId: 'c' })).resolves.toEqual({
+      sca: { required: true },
+      passkeys: [{ passkeyId: 'p-1' }],
+    })
+    rec.reply({ rawBody: '{"data":{"sca":{"required":false},"passkeys":[]}}' })
+    await expect(daa.passkeys.status({ clientEntityId: 'c' })).resolves.toEqual({
+      sca: { required: false },
+      passkeys: [],
+    })
+    // The same GET as list(), not a route of its own.
+    expect(rec.sent.map((r) => `${r.method} ${r.url}`)).toEqual([
+      'GET https://api.circle.com/v1/accounts/passkeys?clientEntityId=c',
+      'GET https://api.circle.com/v1/accounts/passkeys?clientEntityId=c',
+    ])
+  })
+
+  it('reads an absent, null or malformed sca as unknown, never as "not required"', async () => {
+    for (const sca of [
+      '',
+      ',"sca":null',
+      ',"sca":{}',
+      ',"sca":{"required":"true"}',
+      ',"sca":[true]',
+    ]) {
+      rec.reply({ rawBody: `{"data":{"passkeys":[]${sca}}}` })
+      await expect(daa.passkeys.status({ clientEntityId: 'c' })).resolves.toEqual({
+        sca: null,
+        passkeys: [],
+      })
+    }
+  })
+
+  it('holds status() to the same passkeys check as list()', async () => {
+    rec.reply({ rawBody: '{"data":{"sca":{"required":true}}}' })
+    await expect(daa.passkeys.status({ clientEntityId: 'c' })).rejects.toMatchObject({
+      message: expect.stringContaining('passkeys') as unknown as string,
+    })
   })
 
   it('refuses {"data": null} rather than returning it as the payload', async () => {
