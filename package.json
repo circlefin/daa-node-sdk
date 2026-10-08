@@ -6,6 +6,7 @@
     "build": "turbo run build",
     "check:type": "turbo run check:type",
     "check:pack": "turbo run check:pack",
+    "check:license": "bash scripts/check-license-headers.sh",
     "lint": "turbo run lint",
     "lint:fix": "turbo run lint:fix",
     "test": "turbo run test",
