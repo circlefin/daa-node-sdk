@@ -1,74 +1,76 @@
-# DAA JavaScript SDKs
+# Circle Digital Asset Accounts JavaScript SDKs
 
-Client and server SDKs for Digital Asset Accounts, as a pnpm + turbo workspace.
-Each package is versioned, tagged and released independently.
+Two npm packages that together add passkey-based Strong Customer Authentication
+(SCA) to your integration with Circle's Digital Asset Accounts. Use them to
+register a passkey for your end user and to have that user approve sensitive
+operations, such as a transfer or a withdrawal, with it.
 
-## Layout
+| Package                                               | Runs on                 | Holds your Circle API key | Purpose                                                                |
+| ----------------------------------------------------- | ----------------------- | ------------------------- | ---------------------------------------------------------------------- |
+| [`@circle-fin/daa-node-sdk`](packages/node/README.md) | Your backend (Node.js)  | Yes                       | Calls Circle's passkey endpoints with your API key                     |
+| [`@circle-fin/daa-web-sdk`](packages/web/README.md)   | Your end user's browser | Never                     | Shows Circle's passkey ceremony in your web app and returns its result |
 
-```
-packages/
-  web/          @circle-fin/daa-web-sdk     browser — SCA passkey ceremonies
-  node/         @circle-fin/daa-node-sdk     server  — API-key authenticated endpoints
-```
+## How the two packages fit together
 
-> **On the repo name.** `daa-node-sdk` predates this layout and now holds a
-> browser package as well as the server one. Renaming it
-> was considered and **deliberately declined** — the published names
-> (`@circle-fin/daa-web-sdk` and `@circle-fin/daa-node-sdk`) are the contract a distributor sees, and the
-> repo name is not part of it. Read the directory, not the repo, to know which
-> side of the trust boundary you are on.
+Your backend and your web app each do one half of the flow. Only a short-lived
+`frameToken` passes from your backend to the browser. Your API key never does.
 
-The split is by **trust boundary**, not by language — that is the one thing to
-understand before adding code here.
+1. **Backend:** `daa.passkeys.createRegistration(...)` opens a registration and
+   returns a `registrationId` and a `frameToken`.
+2. **Backend to browser:** send the `frameToken` (and nothing else from that
+   response) to your page.
+3. **Browser:** `sca.enroll(frameToken, ...)` shows Circle's ceremony. The user
+   creates a passkey, and the SDK returns the browser's result.
+4. **Browser to backend:** send that result back to your backend unchanged.
+5. **Backend:** `daa.passkeys.complete(...)` finishes the registration.
 
-|                         | `node`                      | `web`                  |
-| ----------------------- | --------------------------- | ---------------------- |
-| Runs on                 | the distributor's server    | the end user's browser |
-| Holds an entity API key | **yes** — that is the point | **never**              |
-| Calls Circle APIs       | directly                    | never                  |
-| Module format           | ESM only                    | ESM only               |
+Approving an operation follows the same pattern with
+`daa.passkeys.openChallenge(...)` on the backend and `sca.approve(...)` in the
+browser. Each package README has a complete example.
 
-The split is a security boundary, not a directory convention. The Node package
-is the only one that receives the entity API key; the browser package receives
-only the ceremony token needed to run the Circle-hosted flow. Keeping them as
-separate packages prevents the server credential and server-only code from
-entering a browser bundle.
+## Requirements
 
-## No private registry
+- Node.js 22 or later, for the backend package and for the toolchain that
+  installs and bundles the browser package.
+- A Circle API key for Digital Asset Accounts, and the origin of each web app
+  that will show the ceremony registered with Circle. Contact your Circle
+  representative if you do not have these.
+- Both packages are ESM-only.
 
-Everything **resolves** from public npm. There is no `.npmrc` and no
-`@circlefin/*` preset dependency, deliberately: these packages are installed by
-distributors, so a fresh clone, an external runner, or a contributor without
-special registry credentials must still be able to build and test.
+## Documentation
 
-**Publishing** is confined to CI automation; nothing here can publish from a
-local checkout.
+- [Server SDK guide](packages/node/README.md)
+- [Browser SDK guide](packages/web/README.md)
+- [How-to: Implement Strong Customer Authentication](https://developers.circle.com/digital-asset-accounts/howtos/strong-customer-authentication)
+  in Circle's developer documentation, for the end-to-end integration flow
+- [Digital Asset Accounts API reference](https://developers.circle.com/api-reference/digital-asset-accounts)
 
 ## Development
+
+This repository is a pnpm and Turborepo workspace. Use Node.js 22 or later.
 
 ```bash
 pnpm install
 pnpm lint          # eslint, no --fix
 pnpm check:type
-pnpm test
 pnpm test:coverage # what CI runs
 pnpm build
 pnpm format:check
 ```
 
-## Releases
+## Support
 
-release-please v4 in **manifest mode** manages versioning for this workspace.
+For integration questions, contact your Circle representative or use the
+support channels listed at [developers.circle.com](https://developers.circle.com).
+Open a GitHub issue for bugs in the SDKs themselves. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
-A merge to `master` opens a release PR **per package**, derived from
-Conventional Commit titles and routed by path: `feat(web): …` touching
-`packages/web` bumps only `@circle-fin/daa-web-sdk`. Each package gets its own
-tag (`daa-web-sdk-v0.2.0`) and its own release notes. The `node-workspace`
-plugin patch-bumps dependents when a shared package changes and rewrites
-`workspace:*` to a real range at publish time.
+## Security
 
-Packages are `private: true` in the repo and stay that way. The publish
-workflow flips it in the manifest it packs, so a checkout — or a stray
-`pnpm publish` — cannot publish anything.
+Do not report security vulnerabilities in public issues. Report them privately
+through Circle's [Vulnerability Disclosure Program](https://hackerone.com/circle-bbp).
+See [SECURITY.md](SECURITY.md) for the full policy.
 
-Public releases are published to npm under `@circle-fin`.
+## License
+
+[Apache License 2.0](LICENSE)
