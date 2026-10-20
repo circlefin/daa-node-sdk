@@ -192,8 +192,12 @@ const validateOrigin = (baseUrl: string, field: string, allowNonCircleBaseUrl: b
     throw new TypeError(`${field} must not carry credentials (got "${baseUrl}")`)
   }
   const isCircleHost = url.hostname === 'circle.com' || url.hostname.endsWith('.circle.com')
-  const isLocalhost = url.hostname === 'localhost'
-  const isLoopbackHttp = url.protocol === 'http:' && isLocalhost
+  // `localhost` and the IPv4/IPv6 loopback literals are equivalent for local
+  // development, so the http allowance below should accept all three rather than
+  // only the literal `localhost`.
+  const isLoopbackHost =
+    url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]'
+  const isLoopbackHttp = url.protocol === 'http:' && isLoopbackHost
 
   if (!isCircleHost && !allowNonCircleBaseUrl) {
     throw new TypeError(
@@ -202,7 +206,7 @@ const validateOrigin = (baseUrl: string, field: string, allowNonCircleBaseUrl: b
   }
   if (url.protocol !== 'https:' && !(isLoopbackHttp && allowNonCircleBaseUrl)) {
     throw new TypeError(
-      `${field} must be https${allowNonCircleBaseUrl ? ' (except http on localhost)' : ''} (got "${baseUrl}")`,
+      `${field} must be https${allowNonCircleBaseUrl ? ' (except http on a loopback host)' : ''} (got "${baseUrl}")`,
     )
   }
   return url.origin
