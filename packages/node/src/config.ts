@@ -169,12 +169,25 @@ export interface DaaSdkConfig {
   readonly transport?: DaaTransport
 }
 
+/**
+ * How a rejected `baseUrl` is named in its error: scheme and host, nothing else.
+ *
+ * Validation errors reach logs, so none of them echoes the configured string.
+ * A username and password are the obvious leak, but a path, query or fragment
+ * can carry a token just as easily, and a value that fails to parse cannot be
+ * trusted to have put its secret anywhere in particular. The scheme and host
+ * are enough to find the line of configuration that set it.
+ */
+const describeOrigin = (url: URL): string =>
+  url.host === '' ? url.protocol : `${url.protocol}//${url.host}`
+
 const validateOrigin = (baseUrl: string, field: string, allowNonCircleBaseUrl: boolean): string => {
   let url: URL
   try {
     url = new URL(baseUrl)
   } catch {
-    throw new TypeError(`${field} is not a valid URL: ${baseUrl}`)
+    // Nothing parsed, so there is no scheme or host to show — only the field.
+    throw new TypeError(`${field} is not a valid URL`)
   }
   // Checked as a *shape*, not by comparing against the raw string. The URL
   // parser lowercases the scheme and host, so comparing `url.origin` to what
@@ -182,14 +195,17 @@ const validateOrigin = (baseUrl: string, field: string, allowNonCircleBaseUrl: b
   // query or fragment — with an error naming the wrong problem.
   if (url.pathname !== '/' || url.search !== '' || url.hash !== '') {
     throw new TypeError(
-      `${field} must be a bare origin with no path, query or fragment (got "${baseUrl}")`,
+      `${field} must be a bare origin with no path, query or fragment (got one after "${describeOrigin(url)}")`,
     )
   }
   if (url.username !== '' || url.password !== '') {
     // Credentials in a base URL would be appended to every request and land in
     // any log that records the URL — and this SDK already has one credential
-    // whose whole design is that it never gets there.
-    throw new TypeError(`${field} must not carry credentials (got "${baseUrl}")`)
+    // whose whole design is that it never gets there. The error names only the
+    // scheme and host for the same reason.
+    throw new TypeError(
+      `${field} must not carry credentials (got some on "${describeOrigin(url)}")`,
+    )
   }
   const isCircleHost = url.hostname === 'circle.com' || url.hostname.endsWith('.circle.com')
   const isLocalhost = url.hostname === 'localhost'
@@ -202,7 +218,7 @@ const validateOrigin = (baseUrl: string, field: string, allowNonCircleBaseUrl: b
   }
   if (url.protocol !== 'https:' && !(isLoopbackHttp && allowNonCircleBaseUrl)) {
     throw new TypeError(
-      `${field} must be https${allowNonCircleBaseUrl ? ' (except http on localhost)' : ''} (got "${baseUrl}")`,
+      `${field} must be https${allowNonCircleBaseUrl ? ' (except http on localhost)' : ''} (got "${describeOrigin(url)}")`,
     )
   }
   return url.origin

@@ -28,6 +28,7 @@ import type { DaaRequest, DaaResponse, DaaTransport } from '../transport.js'
 
 const BASE = 'https://api.circle.com'
 const KEY = 'test-api-key'
+const USERNAME = 'j***@example.com'
 
 interface Recorder {
   readonly sent: DaaRequest[]
@@ -80,7 +81,11 @@ describe('routes', () => {
     // distributor calls. The API gateway exposes this group. Getting it wrong is a 404 that
     // reads as a missing feature.
     rec.reply({ body: JSON.stringify({ registrationId: 'r', expiresAt: 't', frameToken: 'f' }) })
-    await daa.passkeys.createRegistration({ clientEntityId: 'c', idempotencyKey: 'i' })
+    await daa.passkeys.createRegistration({
+      clientEntityId: 'c',
+      idempotencyKey: 'i',
+      username: USERNAME,
+    })
     expect(rec.sent[0]?.url).toBe('https://api.circle.com/v1/accounts/passkeys/registrations')
     expect(rec.sent[0]?.url).not.toContain('/daa/')
   })
@@ -139,6 +144,7 @@ describe('routes', () => {
     await daa.passkeys.createRegistration({
       clientEntityId: 'c',
       idempotencyKey: 'i',
+      username: USERNAME,
       embedOrigin: 'https://app.example.com',
     })
     rec.reply({
@@ -154,6 +160,7 @@ describe('routes', () => {
     expect(JSON.parse(rec.sent[0]?.body ?? '{}')).toEqual({
       clientEntityId: 'c',
       idempotencyKey: 'i',
+      username: USERNAME,
       embedOrigin: 'https://app.example.com',
     })
     expect(JSON.parse(rec.sent[1]?.body ?? '{}')).toEqual({
@@ -162,6 +169,198 @@ describe('routes', () => {
       intent: {},
       embedOrigin: 'https://app.example.com',
     })
+  })
+
+  it('sends username and displayName as given on createRegistration', async () => {
+    // Circle normalizes and validates the labels. The SDK must not: a value it
+    // trimmed or re-encoded would no longer match the original on a replay
+    // under the same idempotency key, which DAA treats as a conflict.
+    rec.reply({ body: JSON.stringify({ registrationId: 'r', expiresAt: 't', frameToken: 'f' }) })
+    await daa.passkeys.createRegistration({
+      clientEntityId: 'c',
+      idempotencyKey: 'i',
+      username: ' Jo\u0301 ',
+    })
+    rec.reply({ body: JSON.stringify({ registrationId: 'r', expiresAt: 't', frameToken: 'f' }) })
+    await daa.passkeys.createRegistration({
+      clientEntityId: 'c',
+      idempotencyKey: 'i',
+      username: USERNAME,
+      displayName: 'Jo at Acme',
+    })
+
+    expect(JSON.parse(rec.sent[0]?.body ?? '{}')).toEqual({
+      clientEntityId: 'c',
+      idempotencyKey: 'i',
+      username: ' Jo\u0301 ',
+    })
+    expect(JSON.parse(rec.sent[1]?.body ?? '{}')).toEqual({
+      clientEntityId: 'c',
+      idempotencyKey: 'i',
+      username: 'j***@example.com',
+      displayName: 'Jo at Acme',
+    })
+  })
+
+  it('leaves username and displayName out of the body when they are omitted', async () => {
+    // Both are optional: Circle then labels the passkey with the end user's
+    // email. The SDK must not send a placeholder that would replace it.
+    rec.reply({ body: JSON.stringify({ registrationId: 'r', expiresAt: 't', frameToken: 'f' }) })
+    await daa.passkeys.createRegistration({ clientEntityId: 'c', idempotencyKey: 'i' })
+
+    expect(JSON.parse(rec.sent[0]?.body ?? '{}')).toEqual({
+      clientEntityId: 'c',
+      idempotencyKey: 'i',
+    })
+  })
+
+  it('sends redirectUri as given on both ceremony opens', async () => {
+    // A native ceremony. DAA exact-matches it against the distributor's
+    // approved callback URIs, so the SDK must not normalize it either.
+    rec.reply({ body: JSON.stringify({ registrationId: 'r', expiresAt: 't', frameToken: 'f' }) })
+    await daa.passkeys.createRegistration({
+      clientEntityId: 'c',
+      idempotencyKey: 'i',
+      username: USERNAME,
+      redirectUri: 'https://app.example.com/sca/callback',
+    })
+    rec.reply({
+      body: JSON.stringify({ challengeId: 'x', expiresAt: 't', summary: {}, frameToken: 'f' }),
+    })
+    await daa.passkeys.openChallenge({
+      clientEntityId: 'c',
+      operation: 'TRANSFER',
+      intent: {},
+      redirectUri: 'https://app.example.com/sca/callback',
+    })
+
+    expect(JSON.parse(rec.sent[0]?.body ?? '{}')).toEqual({
+      clientEntityId: 'c',
+      idempotencyKey: 'i',
+      username: USERNAME,
+      redirectUri: 'https://app.example.com/sca/callback',
+    })
+    expect(JSON.parse(rec.sent[1]?.body ?? '{}')).toEqual({
+      clientEntityId: 'c',
+      operation: 'TRANSFER',
+      intent: {},
+      redirectUri: 'https://app.example.com/sca/callback',
+    })
+  })
+
+  it.each([
+    ['mixed-case host', 'https://App.Example.COM/sca/callback'],
+    [
+      'percent-encoding kept as written',
+      'https://app.example.com/sca%2Fcallback?tenant=o%27reilly&x=%7e',
+    ],
+    ['trailing slash', 'https://app.example.com/sca/callback/'],
+    ['custom scheme', 'com.example.app.sca://callback'],
+    ['custom scheme with an empty authority', 'com.example.app:/sca'],
+  ])(
+    'sends a redirectUri with %s byte for byte on both ceremony opens',
+    async (_case, redirectUri) => {
+      // The SDK must never normalize: DAA exact-matches the stored value, so any
+      // rewrite here would turn an approved URI into a 420068.
+      rec.reply({ body: JSON.stringify({ registrationId: 'r', expiresAt: 't', frameToken: 'f' }) })
+      await daa.passkeys.createRegistration({
+        clientEntityId: 'c',
+        idempotencyKey: 'i',
+        username: USERNAME,
+        redirectUri,
+      })
+      rec.reply({
+        body: JSON.stringify({ challengeId: 'x', expiresAt: 't', summary: {}, frameToken: 'f' }),
+      })
+      await daa.passkeys.openChallenge({
+        clientEntityId: 'c',
+        operation: 'TRANSFER',
+        intent: {},
+        redirectUri,
+      })
+
+      for (const sent of rec.sent) {
+        expect(sent.body).toContain(`"redirectUri":${JSON.stringify(redirectUri)}`)
+        expect(JSON.parse(sent.body ?? '{}')).toMatchObject({ redirectUri })
+      }
+    },
+  )
+
+  it('leaves embedOrigin and redirectUri exclusivity to the server', async () => {
+    // Body fields are not validated client-side; DAA answers both-set with
+    // 400 API_PARAMETER_INVALID, and the caller sees that response as-is.
+    rec.reply({
+      status: 400,
+      rawBody: '{"code":2,"message":"embedOrigin and redirectUri are mutually exclusive"}',
+    })
+    await expect(
+      daa.passkeys.createRegistration({
+        clientEntityId: 'c',
+        idempotencyKey: 'i',
+        username: USERNAME,
+        embedOrigin: 'https://app.example.com',
+        redirectUri: 'https://app.example.com/sca/callback',
+      }),
+    ).rejects.toMatchObject({ status: 400, code: 2 })
+    expect(JSON.parse(rec.sent[0]?.body ?? '{}')).toMatchObject({
+      embedOrigin: 'https://app.example.com',
+      redirectUri: 'https://app.example.com/sca/callback',
+    })
+
+    rec.reply({
+      status: 400,
+      rawBody: '{"code":2,"message":"embedOrigin and redirectUri are mutually exclusive"}',
+    })
+    await expect(
+      daa.passkeys.openChallenge({
+        clientEntityId: 'c',
+        operation: 'TRANSFER',
+        intent: {},
+        embedOrigin: 'https://app.example.com',
+        redirectUri: 'https://app.example.com/sca/callback',
+      }),
+    ).rejects.toMatchObject({ status: 400, code: 2 })
+    expect(JSON.parse(rec.sent[1]?.body ?? '{}')).toMatchObject({
+      embedOrigin: 'https://app.example.com',
+      redirectUri: 'https://app.example.com/sca/callback',
+    })
+  })
+
+  it('surfaces an unapproved redirectUri as SCA_REDIRECT_URI_NOT_ALLOWED', async () => {
+    rec.reply({
+      status: 400,
+      rawBody: '{"code":420068,"message":"The redirectUri is not an approved SCA callback URI"}',
+    })
+    await expect(
+      daa.passkeys.openChallenge({
+        clientEntityId: 'c',
+        operation: 'TRANSFER',
+        intent: {},
+        redirectUri: 'https://app.example.com/sca/callback/',
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: DAA_ERROR_CODES.SCA_REDIRECT_URI_NOT_ALLOWED,
+    })
+    expect(DAA_ERROR_CODES.SCA_REDIRECT_URI_NOT_ALLOWED).toBe(420068)
+  })
+
+  it('names the passkey Owner codes with the numbers DAA allocates', () => {
+    expect(DAA_ERROR_CODES.SCA_SCHEMA_VERSION_REQUIRED).toBe(420071)
+    expect(DAA_ERROR_CODES.SCA_SCHEMA_VERSION_UNSUPPORTED).toBe(420072)
+    expect(DAA_ERROR_CODES.SCA_FIELD_NOT_SUPPORTED_ON_LANE).toBe(420073)
+    expect(DAA_ERROR_CODES.SCA_LANE_ROUTE_UNSUPPORTED).toBe(420074)
+    expect(DAA_ERROR_CODES.SCA_LANE_UNRESOLVED).toBe(420075)
+    expect(DAA_ERROR_CODES.SCA_ENCLAVE_UNAVAILABLE).toBe(420076)
+    expect(DAA_ERROR_CODES.PASSKEY_OWNER_REVOKE_REQUIRED).toBe(420077)
+    expect(DAA_ERROR_CODES.PASSKEY_OWNER_CREDENTIAL_NOT_REVOCABLE).toBe(420078)
+    expect(DAA_ERROR_CODES.PASSKEY_OWNER_ENROLLMENT_REQUIRED).toBe(420079)
+    expect(DAA_ERROR_CODES.PASSKEY_OWNER_CREDENTIAL_KIND_MISMATCH).toBe(420080)
+  })
+
+  it('gives every error code its own number', () => {
+    const numbers = Object.values(DAA_ERROR_CODES)
+    expect(new Set(numbers).size).toBe(numbers.length)
   })
 
   it('omits pathParameters entirely for a bodied operation', async () => {
@@ -204,7 +403,11 @@ describe('auth and headers', () => {
     expect(rec.sent[0]?.headers).not.toHaveProperty('content-type')
 
     rec.reply({ body: JSON.stringify({ registrationId: 'r', expiresAt: 't', frameToken: 'f' }) })
-    await daa.passkeys.createRegistration({ clientEntityId: 'c', idempotencyKey: 'i' })
+    await daa.passkeys.createRegistration({
+      clientEntityId: 'c',
+      idempotencyKey: 'i',
+      username: USERNAME,
+    })
     expect(rec.sent[1]?.headers['content-type']).toBe('application/json')
   })
 })
@@ -383,7 +586,11 @@ describe('the data envelope', () => {
   it('unwraps data, so the payload is the payload', async () => {
     // Captured from a Circle test environment: every success response is wrapped.
     rec.reply({ rawBody: '{"data":{"registrationId":"r-1","expiresAt":"t","frameToken":"f-1"}}' })
-    const reg = await daa.passkeys.createRegistration({ clientEntityId: 'c', idempotencyKey: 'i' })
+    const reg = await daa.passkeys.createRegistration({
+      clientEntityId: 'c',
+      idempotencyKey: 'i',
+      username: USERNAME,
+    })
 
     // Before the unwrap these were all `undefined` while the type said
     // otherwise, so the flow died at "hand frameToken to the page".
@@ -396,7 +603,11 @@ describe('the data envelope', () => {
     // missing.
     rec.reply({ rawBody: '{"registrationId":"r-1","frameToken":"f-1"}' })
     await expect(
-      daa.passkeys.createRegistration({ clientEntityId: 'c', idempotencyKey: 'i' }),
+      daa.passkeys.createRegistration({
+        clientEntityId: 'c',
+        idempotencyKey: 'i',
+        username: USERNAME,
+      }),
     ).rejects.toMatchObject({
       status: 200,
       message: expect.stringContaining('"data" payload') as unknown as string,
@@ -482,7 +693,11 @@ describe('the data envelope', () => {
 
     rec.reply({ rawBody: '{"data":null}' })
     await expect(
-      daa.passkeys.createRegistration({ clientEntityId: 'c', idempotencyKey: 'i' }),
+      daa.passkeys.createRegistration({
+        clientEntityId: 'c',
+        idempotencyKey: 'i',
+        username: USERNAME,
+      }),
     ).rejects.toMatchObject({
       message: expect.stringContaining('"data" payload') as unknown as string,
     })
@@ -812,6 +1027,76 @@ describe('config validation', () => {
         transport: t,
       }),
     ).toThrow(/credentials/)
+  })
+
+  describe('never echoes a rejected base url', () => {
+    // Validation errors reach logs. Each row carries placeholder userinfo and
+    // is rejected by a different check; the expected pattern pins which one,
+    // so a reordering that moves a row onto another branch fails here rather
+    // than quietly leaving a branch untested.
+    const USER = 'placeholder-user'
+    const PASS = 'placeholder-pass'
+    const USERINFO = `${USER}:${PASS}@`
+
+    const messageFor = (baseUrl: string, allowNonCircleBaseUrl?: true): string => {
+      try {
+        createDaaClient({
+          environment: 'production',
+          baseUrl,
+          ...(allowNonCircleBaseUrl === undefined ? {} : { allowNonCircleBaseUrl }),
+          apiKey: KEY,
+          transport: rec.transport,
+        })
+      } catch (error) {
+        expect(error).toBeInstanceOf(TypeError)
+        return (error as TypeError).message
+      }
+      throw new Error(`expected ${baseUrl} to be rejected`)
+    }
+
+    it.each([
+      ['userinfo', `https://${USERINFO}api.circle.com`, /must not carry credentials/],
+      ['a malformed url', `https://${USERINFO}exa mple.circle.com`, /is not a valid URL$/],
+      ['a malformed port', `https://${USERINFO}api.circle.com:99999`, /is not a valid URL$/],
+      ['a path', `https://${USERINFO}api.circle.com/v1`, /bare origin/],
+      ['a query', `https://${USERINFO}api.circle.com?token=placeholder-token`, /bare origin/],
+      ['a fragment', `https://${USERINFO}api.circle.com#placeholder-token`, /bare origin/],
+      ['an opaque url with no host', `mailto:${USER}:${PASS}@api.circle.com`, /bare origin/],
+    ])('omits the username and password for %s', (_case, baseUrl, expected) => {
+      const message = messageFor(baseUrl)
+      expect(message).toMatch(expected)
+      expect(message).not.toContain(USER)
+      expect(message).not.toContain(PASS)
+      expect(message).not.toContain('placeholder-token')
+    })
+
+    it('names at most the scheme and host in each message', () => {
+      expect(messageFor(`https://${USERINFO}api.circle.com/v1?token=placeholder-token`)).toBe(
+        'baseUrl must be a bare origin with no path, query or fragment (got one after "https://api.circle.com")',
+      )
+      expect(messageFor(`https://${USERINFO}api.circle.com`)).toBe(
+        'baseUrl must not carry credentials (got some on "https://api.circle.com")',
+      )
+      expect(messageFor('not a url')).toBe('baseUrl is not a valid URL')
+    })
+
+    it('omits them for an unsupported scheme too', () => {
+      // Userinfo is rejected before the scheme is looked at, so a URL carrying
+      // both stops at the credentials check. The scheme check is still
+      // asserted to report only scheme and host — not the configured string —
+      // so it stays safe if the order ever changes.
+      const withUserinfo = messageFor(`ftp://${USERINFO}localhost`, true)
+      expect(withUserinfo).toMatch(/must not carry credentials/)
+      expect(withUserinfo).not.toContain(USER)
+      expect(withUserinfo).not.toContain(PASS)
+
+      expect(messageFor('ftp://localhost:2121/', true)).toBe(
+        'baseUrl must be https (except http on localhost) (got "ftp://localhost:2121")',
+      )
+      expect(messageFor('http://api.circle.com/')).toBe(
+        'baseUrl must be https (got "http://api.circle.com")',
+      )
+    })
   })
 
   it('rejects timeoutMs values outside the supported timer range', () => {

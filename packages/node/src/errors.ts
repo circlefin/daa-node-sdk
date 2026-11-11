@@ -24,7 +24,7 @@
  *
  * Whether a number reaches you unchanged is a second question, and the answer
  * is the API gateway: **every route this package calls is proxied through it**,
- * including the ones whose codes fall outside the `420046`–`420067` SCA block.
+ * including the ones whose codes fall outside the `420046`–`420080` SCA block.
  * It maps a downstream code to a public one from an allow-list, and a code
  * missing from that list does not arrive as itself — it arrives as `-1` with
  * a generic message. So a code named here is one Circle intends you to branch
@@ -47,7 +47,9 @@ export const DAA_ERROR_CODES = {
   // with a different `spcCapable`, or with a different `clientEntityId` the
   // caller also owns — ownership is verified before the idempotency lookup,
   // so one it does not own returns `CLIENT_ENTITY_NOT_OWNED` instead. A
-  // different `embedOrigin` is the same 409.
+  // different `embedOrigin` or `redirectUri` is the same 409, and so is a
+  // `username` or `displayName` that differs from the original's (see
+  // `CreateRegistrationRequest.username` for when an omitted one counts).
   //
   // Listed because a caller hits them before they hit anything in the SCA
   // block — the first is what an unmapped end user returns, which is the
@@ -58,11 +60,12 @@ export const DAA_ERROR_CODES = {
   // Raised by this package's routes. Three of the five can fail this way:
   // `complete()`, which is where an attestation is verified; `openChallenge()`;
   // and `createRegistration()`, which fails when the distributor has no SCA
-  // partner origin configured — a condition `openChallenge()` reports the
-  // same way. `list` and `revoke` have no SCA-block failure of their own:
-  // `list` verifies ownership and nothing else, so `CLIENT_ENTITY_NOT_OWNED`
-  // is the only code above it can return; `revoke` does the same and then
-  // answers a plain `404` — no DAA code — for a passkey that is not there.
+  // partner origin configured, or names a callback URI Circle has not
+  // approved — conditions `openChallenge()` reports the same way. `list`
+  // and `revoke` have no SCA-block failure of their own: `list` verifies
+  // ownership and nothing else, so `CLIENT_ENTITY_NOT_OWNED` is the only
+  // code above it can return; `revoke` does the same and then answers a
+  // plain `404` — no DAA code — for a passkey that is not there.
   // Neither performs an idempotency lookup; only `createRegistration` does.
   PASSKEY_REGISTRATION_EXPIRED: 420051, // complete()
   PASSKEY_REGISTRATION_CONSUMED: 420052, // complete()
@@ -76,6 +79,15 @@ export const DAA_ERROR_CODES = {
   // that matches none of your approved origins is `API_PARAMETER_INVALID`
   // (`code: 2`) instead, because that one is the request's to fix.
   SCA_ORIGIN_NOT_CONFIGURED: 420064, // createRegistration(), openChallenge()
+  // Raised by `createRegistration()` and `openChallenge()` alike, when a
+  // `redirectUri` does not exactly match one of the callback URIs Circle has
+  // approved for you, or is not usable as a callback at all (a fragment,
+  // user-info, whitespace, or a scheme such as `http:`). The request's to
+  // fix, like an unapproved `embedOrigin` — but with its own code, so a native
+  // integration can tell a wrong callback from a malformed body. Sending both
+  // `redirectUri` and `embedOrigin` is `API_PARAMETER_INVALID` (`code: 2`)
+  // instead, and so is a `redirectUri` over 2048 characters.
+  SCA_REDIRECT_URI_NOT_ALLOWED: 420068, // createRegistration(), openChallenge()
   // `complete()` with a `registrationId` that does not exist, or that belongs
   // to another entity — deliberately indistinguishable. Answered with `404`.
   PASSKEY_REGISTRATION_NOT_FOUND: 420065, // complete()
@@ -110,6 +122,31 @@ export const DAA_ERROR_CODES = {
   // Raised by the ceremony frame's own read, which the browser SDK drives.
   CEREMONY_TOKEN_REQUIRED: 420056,
   CEREMONY_CONSUMED_OR_EXPIRED: 420057,
+
+  // These belong to an account whose Owner credential is a passkey. A custodial
+  // integration that does not send `schemaVersion` never sees them.
+  //
+  // `openChallenge()`: `schemaVersion` is required for such an account and has to
+  // name a version Circle accepts for the operation. Sent for any other
+  // account, it is refused with `SCA_FIELD_NOT_SUPPORTED_ON_LANE` rather than
+  // ignored, so a client never gets a ceremony it did not ask for.
+  SCA_SCHEMA_VERSION_REQUIRED: 420071, // openChallenge()
+  SCA_SCHEMA_VERSION_UNSUPPORTED: 420072, // openChallenge()
+  SCA_FIELD_NOT_SUPPORTED_ON_LANE: 420073, // openChallenge()
+  // The validate route is not used for a challenge opened for a passkey Owner.
+  SCA_LANE_ROUTE_UNSUPPORTED: 420074, // the validate route
+  // `503`s. Back off rather than retrying in a loop. `SCA_ENCLAVE_UNAVAILABLE`
+  // is the transient one. `SCA_LANE_UNRESOLVED` can instead mean the account's
+  // credential could not be determined, or that passkey accounts are switched
+  // off for you, and neither clears within seconds.
+  SCA_LANE_UNRESOLVED: 420075, // openChallenge(), and the gated route
+  SCA_ENCLAVE_UNAVAILABLE: 420076, // openChallenge(), and the gated route
+  // `409`s. Enrolling or changing a passkey Owner's credentials. None of these
+  // clears by retrying; each says what to do first.
+  PASSKEY_OWNER_REVOKE_REQUIRED: 420077, // auth.registerDeviceKey()
+  PASSKEY_OWNER_CREDENTIAL_NOT_REVOCABLE: 420078, // revoke()
+  PASSKEY_OWNER_ENROLLMENT_REQUIRED: 420079, // complete()
+  PASSKEY_OWNER_CREDENTIAL_KIND_MISMATCH: 420080, // auth.registerDeviceKey()
 
   // **Never reaches a caller.** Both are internal reasons only, and DAA
   // deliberately maps exactly these two to `SCA_ASSERTION_INVALID` (420046)
