@@ -60,11 +60,14 @@ const daa = createDaaClient({
 const { registrationId, frameToken } = await daa.passkeys.createRegistration({
   clientEntityId, // the end user's client entity ID
   idempotencyKey: randomUUID(),
+  username: 'j***@example.com', // how the passkey is labeled
+  displayName: 'Jo', // optional, defaults to username
   embedOrigin: 'https://app.example.com', // the page that will show the ceremony
 })
 
 // Send ONLY frameToken to the page. Keep registrationId on your side, for
 // example in the user's session, so you can pair it with the result in step 3.
+// (A passkey Owner enrolls differently: see "Relaying a login".)
 
 // Step 3. After the page sends back the result of sca.enroll(), submit it
 // exactly as received.
@@ -219,10 +222,13 @@ All methods are on `daa.passkeys`, return promises, and unwrap Circle's
 | ---------------- | -------- | --------------------------------------------------------------------------------------- |
 | `clientEntityId` | Yes      | The end user. It must belong to your entity.                                            |
 | `idempotencyKey` | Yes      | A unique value per registration attempt, such as a UUID.                                |
+| `username`       | No       | The account name the passkey is saved under. Defaults to the user's email. See below.   |
+| `displayName`    | No       | A friendlier name for the passkey. Defaults to `username`.                              |
 | `embedOrigin`    | No       | The origin of your page that shows the ceremony, for example `https://app.example.com`. |
+| `redirectUri`    | No       | For a ceremony in your iOS or Android app instead of a web page. See below.             |
 | `spcCapable`     | No       | Leave unset unless Circle tells you otherwise.                                          |
 
-**Always send `embedOrigin`.** It must exactly match one of the web app origins
+**For a web ceremony, always send `embedOrigin`.** It must exactly match one of the web app origins
 Circle has registered for you (scheme, host and port, with no trailing slash
 or path, at most 512 characters). The ceremony is bound to that origin. With a
 single registered origin, omitting it works, but the call starts failing with
@@ -233,11 +239,64 @@ the same error. If you have no registered origin at all, you get
 
 The same `embedOrigin` rules apply to `openChallenge`.
 
+#### Labeling the passkey with `username`
+
+The passkey prompt and the user's password manager (such as iCloud Keychain or
+Google Password Manager) show `username` and `displayName` to identify the
+passkey.
+
+- Both are optional. Without `username`, Circle uses the end user's **full,
+  unmasked** email on file, or their client entity ID when there is none.
+  `displayName` defaults to `username`. Send a masked `username` if the full
+  email should not be saved to the user's password manager.
+- Each value must not be blank and must be at most 64 bytes in UTF-8, after
+  Circle trims it and normalizes it to NFC. Control characters, line
+  separators, private-use characters and invisible formatting characters (such
+  as bidirectional overrides) are refused. Any of these returns
+  `API_PARAMETER_INVALID` (`code: 2`).
+- The labels are display only. Circle doesn't authorize on them, and they
+  don't change which passkey a synced authenticator replaces.
+- **They stay on the user's devices.** Circle clears them once the
+  registration completes, but the password manager keeps them and may sync
+  them. Prefer a masked identifier such as `j***@example.com` over a full
+  email address or phone number.
+
+#### In a native app, send `redirectUri` instead
+
+When the ceremony runs in your iOS or Android app, send `redirectUri` instead
+of `embedOrigin`. Circle's ceremony page then runs in the platform's
+authentication browser rather than in a frame, and returns the result by
+navigating to that URI. Give the `frameToken` to Circle's iOS or Android SDK,
+not to `@circle-fin/daa-web-sdk`. The ceremony page refuses a native token
+that a web page gives it.
+
+- `redirectUri` must **exactly** match one of the callback URIs Circle has
+  approved for you. Nothing is normalized, so a trailing slash, a different
+  host case or an added query string makes a different URI. It is at most
+  2048 characters.
+- A URI that is not approved, or that cannot be a callback (it has a fragment,
+  user-info or whitespace, or uses a scheme such as `http:`), returns
+  `SCA_REDIRECT_URI_NOT_ALLOWED` (`420068`).
+- A native ceremony needs no registered web origin, so
+  `SCA_ORIGIN_NOT_CONFIGURED` does not apply to it.
+- If Circle removes the URI from your approved callback URIs before the
+  ceremony completes, the ceremony fails.
+- `embedOrigin` and `redirectUri` are **mutually exclusive**. Sending both
+  returns `API_PARAMETER_INVALID` (`code: 2`). The SDK does not check this
+  itself. It sends both fields as given, and Circle answers.
+
+The same `redirectUri` rules apply to `openChallenge`.
+
 #### Retrying and idempotency
 
 Calling `createRegistration` again with the same `idempotencyKey` returns the
 same registration (same `registrationId` and `expiresAt`) with a **new
 `frameToken`**, and the previous token stops working.
+A retry that sends a different `username` or `displayName` under the same key
+returns `IDEMPOTENCY_KEY_REUSED` (`420034`). Values are compared after Circle
+trims and normalizes them. If the retry sends `username`, an omitted
+`displayName` means `username` again, so it must match the original pair.
+Omitting `username` on a retry is not a conflict.
 
 - Retrying after a network failure where you never received a response is
   safe.
@@ -246,12 +305,14 @@ same registration (same `registrationId` and `expiresAt`) with a **new
   your user is in the middle of stops working, and nothing in the response
   says so. If you need to restart, use a new `idempotencyKey`.
 
-Reusing a key with a different `spcCapable` or `embedOrigin` value returns
-`IDEMPOTENCY_KEY_REUSED` (HTTP `409`).
+Reusing a key with a different `spcCapable`, `embedOrigin` or `redirectUri`
+value returns `IDEMPOTENCY_KEY_REUSED` (HTTP `409`).
 
 - An omitted `spcCapable` counts as `false`.
 - Omitting `embedOrigin` on a retry is not a conflict. The original ceremony
   comes back, still bound to the origin it was opened for.
+- Omitting `redirectUri` on a retry **is** a conflict. A retry must send the
+  same `redirectUri` as the original, or none if the original sent none.
 
 ### `complete`
 
@@ -278,7 +339,8 @@ After a user has registered a passkey, you can require them to approve an
 operation with it. The sequence has four steps and the final request is yours:
 
 1. **Your backend** calls `daa.passkeys.openChallenge(...)` with the exact
-   request you intend to send, and sends only the `frameToken` to the page.
+   request you intend to send, and sends only the `frameToken` to the page
+   (with `challengeId` for a passkey Owner, see [Relaying a login](#relaying-a-login)).
 2. **Your web app** calls `sca.approve(frameToken, ...)` from
    `@circle-fin/daa-web-sdk`. It returns the assertion as a string.
 3. The page sends that string to your backend over your own authenticated
@@ -296,7 +358,8 @@ const { challengeId, frameToken } = await daa.passkeys.openChallenge({
   intent: transferBody,
   embedOrigin: 'https://app.example.com',
 })
-// Send frameToken to the page. Keep challengeId on your side.
+// Send frameToken to the page. Keep challengeId on your side, unless the end
+// user's Owner credential is a passkey (see "Relaying a login").
 
 // Step 4. `assertion` is the string the page returned from sca.approve().
 await fetch('https://api-sandbox.circle.com/v1/accounts/transfers', {
@@ -322,7 +385,8 @@ so use the API origin for your environment (see [Environments](#environments)).
 | `operation`      | Yes      | The operation, as an uppercase name: `TRANSFER`, `WITHDRAWAL`, `WIRE_ACCOUNT_CREATE`, `ADDRESS_BOOK_ADD` or `ADDRESS_BOOK_DELETE`. |
 | `intent`         | Yes      | The gated route's own request body, verbatim. Use `{}` for `ADDRESS_BOOK_DELETE`, which has no body.                               |
 | `pathParameters` | No       | Path parameters for an operation whose subject is in the URL. Used by `ADDRESS_BOOK_DELETE`.                                       |
-| `embedOrigin`    | No       | Same rules as for `createRegistration`. Always send it.                                                                            |
+| `embedOrigin`    | No       | Same rules as for `createRegistration`. Always send it for a web ceremony.                                                         |
+| `redirectUri`    | No       | Same rules as for `createRegistration`. Send it instead of `embedOrigin` for a native ceremony.                                    |
 
 The operations correspond to these routes:
 
@@ -364,6 +428,40 @@ Whether Circle requires SCA for a particular request is Circle's
 determination for the end user's entity. A request that does not require SCA
 succeeds without the headers. If you believe a request should have required
 SCA and did not, contact Circle.
+
+## Relaying a login
+
+For a browser sign-in, three calls on `daa.auth` carry the client's requests to Circle.
+They are an opaque relay: you forward what the client sent and return what comes back.
+
+```ts
+// `rawBody` is the request body exactly as the client sent it.
+const { status, rawBody: reply } = await daa.auth.prepareLogin(rawBody)
+await daa.auth.socialSession(rawBody)
+
+// Node types an unlisted header as `string | string[] | undefined`.
+const flow = req.headers['x-registration-flow-authorization']
+const device = req.headers['x-device-authorization']
+await daa.auth.registerDeviceKey(rawBody, {
+  registrationFlowAuthorization: typeof flow === 'string' ? flow : '',
+  deviceAuthorization: typeof device === 'string' ? device : undefined,
+})
+```
+
+- **Do not parse and serialize the body again.** Each proof on `registerDeviceKey` is a
+  signature over the exact bytes of the body, so any change makes it fail.
+- **Each call returns `{ status, rawBody }`.** Send both back to the client unchanged.
+  A failure throws `DaaApiError`, which carries the same two fields. A success is never
+  turned into an error because of its body: it comes back exactly as Circle sent it.
+- Both proofs are compact JWS strings. A value that is not one, including an empty string,
+  throws `TypeError` before anything is sent. Omit `deviceAuthorization` or pass `undefined`
+  when the client sent none.
+- **An end user whose Owner credential is a passkey needs two IDs in the browser** that
+  the other flows keep on your backend. Send `registrationId` from `createRegistration`
+  with its `frameToken`, because the browser signs that ID into the `registerDeviceKey` body,
+  and do not call `complete`: `registerDeviceKey` completes the registration. Send
+  `challengeId` from `openChallenge` with its `frameToken`. Never send the `summary` or
+  any credential.
 
 ## Error handling
 
@@ -407,12 +505,22 @@ Codes you are most likely to branch on:
 | `PASSKEY_CREDENTIAL_ALREADY_REGISTERED` | `420053` | `complete`                             | This authenticator credential is already registered. Route the user to step-up instead of enrollment.                 |
 | `SCA_ASSERTION_INVALID`                 | `420046` | `complete`, and the gated request      | The submitted ceremony result did not verify. Open a new ceremony.                                                    |
 | `SCA_OPERATION_NOT_IMPLEMENTED`         | `420062` | `openChallenge`                        | The `operation` is not one of the supported names above.                                                              |
-| `SCA_ORIGIN_NOT_CONFIGURED`             | `420064` | `createRegistration`, `openChallenge`  | No web app origin is registered for you. Contact Circle.                                                              |
+| `SCA_ORIGIN_NOT_CONFIGURED`             | `420064` | `createRegistration`, `openChallenge`  | No web app origin is registered for you. Contact Circle. Does not apply to a native ceremony.                         |
+| `SCA_REDIRECT_URI_NOT_ALLOWED`          | `420068` | `createRegistration`, `openChallenge`  | The `redirectUri` is not one of your approved callback URIs, or cannot be a callback.                                 |
 
 `DAA_ERROR_CODES` also contains codes for the gated request, such as
 `SCA_ASSERTION_REQUIRED` (`420058`), `SCA_INTENT_MISMATCH` (`420047`),
 `SCA_CHALLENGE_EXPIRED` (`420054`) and `SCA_CHALLENGE_CONSUMED` (`420055`).
 Treat each as "this challenge cannot be used; open a new one."
+
+It also contains codes for an account whose Owner credential is a passkey
+(`420071` to `420080`). `SCA_SCHEMA_VERSION_REQUIRED`,
+`SCA_SCHEMA_VERSION_UNSUPPORTED` and `SCA_FIELD_NOT_SUPPORTED_ON_LANE` come from
+`openChallenge`. `SCA_LANE_UNRESOLVED` and `SCA_ENCLAVE_UNAVAILABLE` are `503`s:
+back off before retrying. `PASSKEY_OWNER_REVOKE_REQUIRED`,
+`PASSKEY_OWNER_CREDENTIAL_NOT_REVOCABLE`, `PASSKEY_OWNER_ENROLLMENT_REQUIRED` and
+`PASSKEY_OWNER_CREDENTIAL_KIND_MISMATCH` are `409`s that name what to do first.
+A custodial integration that does not send `schemaVersion` never sees them.
 
 Other values of `code` to handle:
 
@@ -435,8 +543,10 @@ verbatim, so apply your normal redaction rules before you log it.
 - **Keep the API key on your server.** Load it from your secret manager or an
   environment variable. Never put it in a browser bundle, a mobile app or a
   repository.
-- **Send the browser only the `frameToken`.** Do not send `registrationId`,
-  `challengeId`, `summary` or anything else from these responses to the page.
+- **Send the browser only the `frameToken`**, plus `registrationId` or `challengeId`
+  for an end user whose Owner credential is a passkey (see
+  [Relaying a login](#relaying-a-login)). Do not send the `summary` or anything else
+  from these responses to the page.
 - **Treat `frameToken` as a secret.** It lets its holder read one pending
   ceremony. Do not log it or put it in a URL. Deliver it to the page over your
   own authenticated channel.

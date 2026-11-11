@@ -1,0 +1,2 @@
+# The golden vectors are pinned by SHA-256, so never rewrite their line endings.
+**/fixtures/sca-intent/** -text

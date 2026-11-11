@@ -25,7 +25,7 @@
  */
 
 export { createDaaClient } from './client.js'
-export type { DaaClient, PasskeysApi } from './client.js'
+export type { AuthApi, DaaClient, PasskeysApi } from './client.js'
 export { DAA_ENVIRONMENTS } from './config.js'
 export type { DaaEnvironment, DaaSdkConfig } from './config.js'
 export {
@@ -37,6 +37,8 @@ export {
 } from './errors.js'
 export { createFetchTransport } from './transport.js'
 export type { DaaRequest, DaaResponse, DaaTransport } from './transport.js'
+export { AUTH_HEADERS } from './auth.js'
+export type { AuthRelayResult, RegisterDeviceKeyHeaders } from './auth.js'
 export { SCA_HEADERS } from './passkeys.js'
 export type {
   ChallengeOpened,

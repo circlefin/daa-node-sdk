@@ -13,7 +13,9 @@ operations, such as a transfer or a withdrawal, with it.
 ## How the two packages fit together
 
 Your backend and your web app each do one half of the flow. Only a short-lived
-`frameToken` passes from your backend to the browser. Your API key never does.
+`frameToken` passes from your backend to the browser (plus one ID for an end
+user whose Owner credential is a passkey, as the node package README explains).
+Your API key never does.
 
 1. **Backend:** `daa.passkeys.createRegistration(...)` opens a registration and
    returns a `registrationId` and a `frameToken`.

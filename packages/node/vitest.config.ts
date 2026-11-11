@@ -26,7 +26,9 @@ export default defineConfig({
       provider: 'v8',
       // See packages/web/vitest.config.ts — `lcov` is not a vitest default and
       // SonarQube and Circle's CI coverage merge both read it.
-      reporter: ['text', 'lcov'],
+      // `projectRoot` keeps `SF:` paths workspace-relative so the merged
+      // report is unambiguous — see packages/web/vitest.config.ts.
+      reporter: ['text', ['lcov', { projectRoot: '../..' }]],
       include: ['src/**/*.ts'],
       exclude: ['src/**/*.test.ts'],
     },

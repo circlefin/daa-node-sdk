@@ -34,6 +34,46 @@ export interface CreateRegistrationRequest {
   /** The end user. Ownership is verified against the calling entity. */
   readonly clientEntityId: string
   /**
+   * The account name the user's passkey is saved under, for example
+   * `j***@example.com`. Optional: when omitted, Circle uses the end user's
+   * **full, unmasked** email on file, or their `clientEntityId` when there is
+   * none. Send a masked `username` if the full email should not be saved to
+   * the user's password manager.
+   *
+   * The passkey prompt, and password managers such as iCloud Keychain and
+   * Google Password Manager, show `username` and `displayName` to identify the
+   * passkey. They are display only: Circle never reads them back or authorizes
+   * on them, and which credential a synced authenticator replaces depends on
+   * `clientEntityId`, not on these labels.
+   *
+   * **They outlive the ceremony on the user's devices.** Circle clears them
+   * once the registration completes, but the password manager keeps them and
+   * may sync them across the user's devices. Prefer a masked identifier over a
+   * full email address or phone number.
+   *
+   * Each value is NFC-normalized and trimmed by Circle, must not be blank, and
+   * must be at most 64 bytes in UTF-8. Control characters, line separators,
+   * private-use characters and invisible formatting characters (such as
+   * bidirectional overrides) are refused; zero-width joiners and non-joiners
+   * are allowed. A value that breaks any of these is `API_PARAMETER_INVALID`
+   * (`code: 2`).
+   *
+   * Part of what `idempotencyKey` identifies, compared after Circle normalizes
+   * it, so `' jo '` and `'jo'` are the same value. A replay that sends
+   * `username` must match the original's `username` and `displayName`, where an
+   * omitted `displayName` means `username` again: if the original sent
+   * `username: 'jo', displayName: 'Jo at Acme'`, a replay of `username: 'jo'`
+   * alone is `DAA_ERROR_CODES.IDEMPOTENCY_KEY_REUSED` (409). A replay that
+   * omits `username` is not a conflict, though a `displayName` it sends must
+   * still match.
+   */
+  readonly username?: string
+  /**
+   * A friendlier name for the passkey, for example `Jo at Acme`. Defaults to
+   * `username`. Same rules as `username`.
+   */
+  readonly displayName?: string
+  /**
    * Replaying this returns the original ceremony rather than opening a second
    * one: the same `registrationId` and the same `expiresAt`.
    *
@@ -62,6 +102,11 @@ export interface CreateRegistrationRequest {
    * A different `embedOrigin` is the same 409. Omitting it on the replay is
    * not a conflict: the original ceremony comes back, still bound to the
    * origin it was opened for.
+   *
+   * A different `redirectUri` is the same 409, and for this field omitting it
+   * is a difference too: a replay must name the same `redirectUri` as the
+   * original, or none if the original named none. Whether the ceremony is
+   * native or web is part of what the key identifies.
    *
    * Reusing it with a different `clientEntityId` is the same conflict in
    * principle, but you will usually see `CLIENT_ENTITY_NOT_OWNED` (420001)
@@ -99,8 +144,35 @@ export interface CreateRegistrationRequest {
    * it, and an embedded ceremony whose top-level page is any other origin is
    * rejected. If this origin is removed from your approved origins before the
    * ceremony completes, the ceremony fails.
+   *
+   * Leave it out when you send `redirectUri`: the two are mutually exclusive.
    */
   readonly embedOrigin?: string
+  /**
+   * Opens a **native** enrollment ceremony instead of a web one, for a ceremony
+   * that runs in your iOS or Android app. This is the app callback URI that
+   * Circle's ceremony page returns the result to, for example
+   * `https://app.example.com/sca/callback`.
+   *
+   * It must **exactly** match one of the callback URIs Circle has approved
+   * for you. Nothing is normalized: a trailing slash, a different host case
+   * or an added query string makes it a different URI. At most 2048
+   * characters. A URI that is not approved, or that cannot be a callback at
+   * all (it has a fragment, user-info or whitespace, or uses a scheme such
+   * as `http:`), is `DAA_ERROR_CODES.SCA_REDIRECT_URI_NOT_ALLOWED`.
+   *
+   * **Mutually exclusive with `embedOrigin`.** Sending both is
+   * `API_PARAMETER_INVALID` (`code: 2`). This SDK sends both fields as given
+   * and leaves that check to Circle, as it does for every other body field.
+   * A native ceremony needs no approved origin, so
+   * `SCA_ORIGIN_NOT_CONFIGURED` does not apply to it.
+   *
+   * **The `frameToken` then goes to Circle's iOS or Android SDK, not to
+   * `@circle-fin/daa-web-sdk`.** The ceremony page refuses a native token
+   * that a web page hands it. If this URI is removed from your approved
+   * callback URIs before the ceremony completes, the ceremony fails.
+   */
+  readonly redirectUri?: string
 }
 
 export interface RegistrationCreated {
@@ -108,7 +180,9 @@ export interface RegistrationCreated {
   /** RFC 3339. Ten minutes — the ceremony's life, not the credential's. */
   readonly expiresAt: string
   /**
-   * Hand this to the browser and nothing else.
+   * Hand this to the browser and nothing else, except that for an end user
+   * whose Owner credential is a passkey the browser also needs
+   * `registrationId`: it signs it into the `registerDeviceKey` body.
    *
    * A capability token: holding it grants a read of exactly this one ceremony.
    * Treat it as a secret in transit. Do **not** send the rest of this response
@@ -285,6 +359,10 @@ export interface OpenChallengeRequest {
    * are all gated — but they are maintained apart, so a challenge you can
    * open is not necessarily a request that will be refused without one.
    *
+   * Two more, `CREATE_ACCOUNT` and `EXPORT_ACCOUNT`, open a challenge only for
+   * an end user whose Owner credential is a passkey, and only once Circle has
+   * enabled that for your entity.
+   *
    * Not narrowed to a union for the same reason `DaaApiError.code` is not: DAA
    * adds an operation without this SDK being republished, and a union here
    * would reject the new one until it was.
@@ -356,7 +434,8 @@ export interface OpenChallengeRequest {
    *   clientEntityId, operation: 'TRANSFER', intent: body,
    * })
    *
-   * // Hand ONLY frameToken to the page. It runs the ceremony with
+   * // Hand frameToken to the page, and for a passkey Owner challengeId too
+   * // (see ChallengeOpened.frameToken). It runs the ceremony with
    * // @circle-fin/daa-web-sdk's approve(), which returns the header value,
    * // and sends that back to you over your own authenticated channel.
    * const assertion: string = await receiveFromPage()
@@ -447,6 +526,15 @@ export interface OpenChallengeRequest {
    */
   readonly pathParameters?: Readonly<Record<string, string>>
   /**
+   * The version of the intent's canonical form that the client computed its
+   * commitment over. Omit it unless the end user's Owner credential is a
+   * passkey: absent means version 1, and the other lane rejects the field.
+   *
+   * It is required for a passkey Owner. The value must be the one the browser
+   * SDK used, so relay it from the page rather than choosing it here.
+   */
+  readonly schemaVersion?: number
+  /**
    * Defaults to `webauthn` server-side. Anything else — including `spc`, which
    * is deferred to V2 — is **rejected rather than defaulted**, so a typo
    * cannot silently downgrade a ceremony.
@@ -472,8 +560,35 @@ export interface OpenChallengeRequest {
    * it, and an embedded ceremony whose top-level page is any other origin is
    * rejected. If this origin is removed from your approved origins before the
    * ceremony completes, the ceremony fails.
+   *
+   * Leave it out when you send `redirectUri`: the two are mutually exclusive.
    */
   readonly embedOrigin?: string
+  /**
+   * Opens a **native** step-up ceremony instead of a web one, for a ceremony
+   * that runs in your iOS or Android app. This is the app callback URI that
+   * Circle's ceremony page returns the result to, for example
+   * `https://app.example.com/sca/callback`.
+   *
+   * It must **exactly** match one of the callback URIs Circle has approved
+   * for you. Nothing is normalized: a trailing slash, a different host case
+   * or an added query string makes it a different URI. At most 2048
+   * characters. A URI that is not approved, or that cannot be a callback at
+   * all (it has a fragment, user-info or whitespace, or uses a scheme such
+   * as `http:`), is `DAA_ERROR_CODES.SCA_REDIRECT_URI_NOT_ALLOWED`.
+   *
+   * **Mutually exclusive with `embedOrigin`.** Sending both is
+   * `API_PARAMETER_INVALID` (`code: 2`). This SDK sends both fields as given
+   * and leaves that check to Circle, as it does for every other body field.
+   * A native ceremony needs no approved origin, so
+   * `SCA_ORIGIN_NOT_CONFIGURED` does not apply to it.
+   *
+   * **The `frameToken` then goes to Circle's iOS or Android SDK, not to
+   * `@circle-fin/daa-web-sdk`.** The ceremony page refuses a native token
+   * that a web page hands it. If this URI is removed from your approved
+   * callback URIs before the ceremony completes, the ceremony fails.
+   */
+  readonly redirectUri?: string
 }
 
 export interface ChallengeOpened {
@@ -487,6 +602,13 @@ export interface ChallengeOpened {
    * untrusted copy.
    */
   readonly summary: Readonly<Record<string, unknown>>
-  /** Hand to the browser. Same capability semantics as `RegistrationCreated.frameToken`. */
+  /**
+   * Hand to the browser. Same capability semantics as `RegistrationCreated.frameToken`.
+   *
+   * For a passkey Owner, also hand the browser `challengeId`. Never hand it the
+   * summary or any credential.
+   */
   readonly frameToken: string
+  /** Echoed from the request. Present only for a passkey Owner. */
+  readonly schemaVersion?: number
 }

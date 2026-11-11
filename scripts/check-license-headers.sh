@@ -23,9 +23,10 @@
 # moves that assertion from something a person remembers to something the build
 # enforces.
 #
-# The set of files checked is read from .github/sync.yml rather than repeated
-# here. Two hand-maintained lists would drift, and a path published but not
-# checked is exactly a file that can ship without a license header.
+# The set of files checked is read from the per-package allowlists
+# (.github/sync-*.yml) rather than repeated here. Two hand-maintained lists
+# would drift, and a path published but not checked is exactly a file that can
+# ship without a license header.
 #
 # Two additions to that set:
 #
@@ -33,14 +34,18 @@
 #     in the allowlist (daa-api-client is one) will be, and its files should
 #     already carry the header when it is, not be found missing in the sync
 #     that publishes them.
-#   * When .github/sync.yml is absent, every tracked source file. That is the
-#     public repository, which does not carry the allowlist: there, everything
+#   * When no .github/sync-*.yml exists, every tracked source file. That is the
+#     public repository, which does not carry the allowlists: there, everything
 #     present is published.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ALLOWLIST=.github/sync.yml
+# Every per-package allowlist. A file is published if any of them names it.
+ALLOWLISTS=()
+for f in .github/sync-*.yml; do
+  if [ -f "$f" ]; then ALLOWLISTS+=("$f"); fi
+done
 
 # Source extensions worth a license header. Data and config formats that cannot
 # carry a comment (JSON, YAML) are deliberately absent. A shell script is source
@@ -63,16 +68,21 @@ add_tracked() {
   done < <(git ls-files -- "$@")
 }
 
-if [ -f "$ALLOWLIST" ]; then
+if [ ${#ALLOWLISTS[@]} -gt 0 ]; then
   published=()
-  while IFS= read -r line; do
-    if [ -n "$line" ]; then published+=("$line"); fi
-  done < <(sed -n 's/^[[:space:]]*-[[:space:]]*source:[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$ALLOWLIST")
-  if [ ${#published[@]} -eq 0 ]; then
-    echo "Parsed no 'source:' entries from $ALLOWLIST; the check would pass vacuously." >&2
-    exit 1
-  fi
-  for entry in "${published[@]}"; do
+  for allowlist in "${ALLOWLISTS[@]}"; do
+    before=${#published[@]}
+    while IFS= read -r line; do
+      if [ -n "$line" ]; then published+=("$line|$allowlist"); fi
+    done < <(sed -n 's/^[[:space:]]*-[[:space:]]*source:[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$allowlist")
+    if [ ${#published[@]} -eq "$before" ]; then
+      echo "Parsed no 'source:' entries from $allowlist; the check would pass vacuously." >&2
+      exit 1
+    fi
+  done
+  for item in "${published[@]}"; do
+    entry="${item%|*}"
+    allowlist="${item##*|}"
     entry="${entry%\"}"; entry="${entry#\"}"
     if [ -d "${entry%/}" ]; then
       add_tracked "${entry%/}"
@@ -81,7 +91,7 @@ if [ -f "$ALLOWLIST" ]; then
     else
       # An entry that names nothing would otherwise drop out of the check without
       # a word, and a published path would go unchecked.
-      echo "$ALLOWLIST names '$entry', which is not a file or directory here." >&2
+      echo "$allowlist names '$entry', which is not a file or directory here." >&2
       exit 1
     fi
   done
